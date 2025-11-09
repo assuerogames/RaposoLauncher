@@ -66,7 +66,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v3.1.0"
+        self.LAUNCHER_VERSION = "v3.2.0"
         self.logo_clicks = 0
         
         self.bg_photo = None
