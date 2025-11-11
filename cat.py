@@ -52,8 +52,6 @@ class ModDownloader(tk.Toplevel):
         self.launcher = launcher_instance
         self.modpack_name = modpack_name
         
-        self.LAUNCHER_VERSION = "v3.9.0"
-
         # Onde salvar os mods
         self.mods_dir = os.path.join(MODPACKS_DIR, modpack_name, "mods")
         os.makedirs(self.mods_dir, exist_ok=True)
@@ -390,7 +388,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v3.6.0"
+        self.LAUNCHER_VERSION = "v4.0.0"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -427,13 +425,14 @@ class RaposoLauncher(ttk.Window):
         
         self.process_ui_queue()
 
+
     def build_ui(self):
         """Constrói a nova interface gráfica com a barra de progresso."""
         
-        # 1. Carrega e desenha o fundo
+        # 1. Carrega e desenha o fundo (Sem mudanças)
         self.load_background()
 
-        # 2. Carrega e desenha o Logo
+        # 2. Carrega e desenha o Logo (Sem mudanças)
         try:
             logo_path = os.path.join(BASE_DIR, "logo.jpg")
             logo_img_raw = Image.open(logo_path)
@@ -459,8 +458,12 @@ class RaposoLauncher(ttk.Window):
         except Exception as e:
             print(f"Erro ao carregar logo.jpg: {e}")
 
+        # --- INÍCIO DA CORREÇÃO (Voltamos ao .place() original) ---
+
         # 3. Cria o Frame lateral para os controles
+        # O PAI é 'self' para herdar o tema
         controls_frame = ttk.Frame(self, padding=25, bootstyle="dark")
+        # Usamos .place() com a altura original
         controls_frame.place(
             x=500, y=100,  
             width=420, height=310 
@@ -512,21 +515,17 @@ class RaposoLauncher(ttk.Window):
         
         button_frame.columnconfigure((0, 1, 2), weight=1)
         
-        # Fileira 1
+        # Fileiras 1, 2, 3... (Tudo igual)
         ttk.Button(button_frame, text="🔧 Ger. Contas", bootstyle="info-outline", command=self.manage_accounts).grid(row=0, column=0, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="➕ Novo", bootstyle="info-outline", command=self.criar_modpack).grid(row=0, column=1, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="✏️ Editar", bootstyle="warning-outline", command=self.editar_modpack).grid(row=0, column=2, sticky="ew", padx=2, pady=2)
-        
-        # Fileira 2
         ttk.Button(button_frame, text="📂 Abrir Pasta", bootstyle="secondary-outline", command=self.abrir_pasta_modpack).grid(row=1, column=0, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="📥 Importar", bootstyle="primary-outline", command=self.importar_modpack).grid(row=1, column=1, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="📤 Exportar", bootstyle="primary-outline", command=self.exportar_modpack).grid(row=1, column=2, sticky="ew", padx=2, pady=2)
-
-        # <--- ADIÇÃO AQUI ---
-        # Fileira 3 (O novo botão)
         ttk.Button(button_frame, text="📥 Baixar Mods (Modrinth)", bootstyle="success-outline", command=self.open_mod_downloader).grid(row=2, column=0, columnspan=3, sticky="ew", padx=2, pady=2)
-        # <--- FIM DA ADIÇÃO ---
         
+        # --- FIM DO CONTROLS_FRAME ---
+
         # 4. Cria o Botão START
         self.start_button = ttk.Button(
             self, 
@@ -534,7 +533,8 @@ class RaposoLauncher(ttk.Window):
             bootstyle="success-outline", 
             command=self.on_start_button_click 
         )
-        self.start_button.place(x=500, y=395, width=420, height=50)
+        # MUDANÇA DE 'Y': 420 (era 395). (y=100 + height=310 + 10px de espaço)
+        self.start_button.place(x=500, y=420, width=420, height=50)
 
         # 5. Cria a Barra de Progresso
         self.progressbar = ttk.Progressbar(
@@ -542,13 +542,18 @@ class RaposoLauncher(ttk.Window):
             mode="determinate", 
             bootstyle="success-striped"
         )
-        self.progressbar.place(x=500, y=455, width=420, height=20)
+        # MUDANÇA DE 'Y': 480 (era 455). (y=420 + height=50 + 10px de espaço)
+        self.progressbar.place(x=500, y=480, width=420, height=20)
         
         # 6. Cria o Label de Status
         self.status_label = ttk.Label(self, text="", font=("Helvetica", 11))
-        self.status_label.place(x=710, y=485, anchor="center") 
+        # MUDANÇA DE 'Y': 510 (era 485). (y=480 + height=20 + 10px de espaço)
+        # (x=710 é 500 + 420/2, está centralizado)
+        self.status_label.place(x=710, y=510, anchor="center") 
 
-        # 7. Copyrights
+        # --- FIM DA CORREÇÃO ---
+
+        # 7. Copyrights (Sem mudanças)
         subtle_color = self.style.colors.get("secondary") 
         self.bg_canvas.create_text(
             940, 575, text="Raposo Launcher (2025) © Raposo", 
@@ -563,7 +568,6 @@ class RaposoLauncher(ttk.Window):
             10, 590, text=self.LAUNCHER_VERSION, 
             font=("Helvetica", 9), fill=subtle_color, anchor="sw" 
         )
-
 
     def _discord_rpc_thread(self):
         """(THREAD) Controla a conexão e atualização do Discord Rich Presence."""
@@ -3029,4 +3033,3 @@ if __name__ == "__main__":
     
     app = RaposoLauncher()
     app.mainloop()
-
