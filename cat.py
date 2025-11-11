@@ -8,6 +8,7 @@ import tkinter as tk
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from tkinter import messagebox, filedialog
+from io import BytesIO
 import requests
 import threading
 from queue import Queue
@@ -17,6 +18,7 @@ import shutil
 import re
 import pypresence
 import time
+
 
 try:
     from PIL import Image, ImageTk, ImageOps
@@ -35,6 +37,326 @@ MODPACKS_DIR = os.path.join(BASE_DIR, "modpacks")
 ACCOUNTS_FILE = os.path.join(BASE_DIR, "accounts.json")
 JAVA_ROOT = os.path.join(BASE_DIR, "java")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+
+class ModDownloader(tk.Toplevel):
+    """Uma janela Toplevel para pesquisar e baixar mods do Modrinth."""
+    
+    def __init__(self, parent, launcher_instance, modpack_name, modpack_config):
+        super().__init__(parent)
+        self.title(f"Baixar Mods para: {modpack_name}")
+        self.geometry("800x500") # <--- AUMENTAMOS A JANELA
+        self.resizable(False, False)
+        self.grab_set()
+        
+        # Guarda referências importantes
+        self.launcher = launcher_instance
+        self.modpack_name = modpack_name
+        
+        # Onde salvar os mods
+        self.mods_dir = os.path.join(MODPACKS_DIR, modpack_name, "mods")
+        os.makedirs(self.mods_dir, exist_ok=True)
+        
+        # Guarda os resultados da busca (AGORA É UM MAPA)
+        self.search_results_map = {}
+        
+        # Guarda a referência da imagem do ícone
+        self.mod_icon_photo = None
+        self.default_mod_icon = None
+        
+        # --- LÓGICA DE DETECÇÃO (Corrigida) ---
+        self.game_version = ""
+        self.loader = ""
+        
+        try:
+            version_id = modpack_config.get("version", "")
+            if not version_id:
+                raise Exception("Modpack não tem versão definida.")
+                
+            if "fabric" in version_id.lower():
+                self.loader = "fabric"
+            elif "forge" in version_id.lower():
+                self.loader = "forge"
+            else:
+                self.loader = "forge" # Padrão
+
+            version_json_path = os.path.join(VERSIONS_DIR, version_id, f"{version_id}.json")
+            if not os.path.exists(version_json_path):
+                raise Exception(f"Arquivo {version_id}.json não encontrado!")
+                
+            with open(version_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            base_version = data.get("inheritsFrom")
+            
+            if base_version:
+                self.game_version = base_version
+            else:
+                self.game_version = version_id
+                
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível determinar a versão do modpack: {e}", parent=self)
+            self.destroy()
+            return
+        
+        
+        # --- Constrói a UI ---
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill="both", expand=True)
+        
+        # --- Topo: Busca ---
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill="x", pady=5)
+        
+        self.search_entry = ttk.Entry(search_frame)
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        self.search_button = ttk.Button(search_frame, text="Buscar", command=self.start_search_thread)
+        self.search_button.pack(side="right")
+        self.search_entry.bind("<Return>", self.start_search_thread)
+        
+        # --- Frame do Meio (Resultados e Preview) ---
+        middle_frame = ttk.Frame(main_frame)
+        middle_frame.pack(fill="both", expand=True, pady=(10, 0))
+        middle_frame.columnconfigure(0, weight=2) # Lista de mods
+        middle_frame.columnconfigure(1, weight=1) # Painel de preview
+        middle_frame.rowconfigure(0, weight=1)
+        
+        # --- Meio-Esquerda: Resultados ---
+        tv_frame = ttk.Frame(middle_frame)
+        tv_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        
+        self.tree = ttk.Treeview(tv_frame, columns=("nome", "autor"), show="headings", height=10)
+        self.tree.heading("nome", text="Nome")
+        self.tree.heading("autor", text="Autor")
+        
+        self.tree.column("nome", width=200)
+        self.tree.column("autor", width=100)
+        
+        scrollbar = ttk.Scrollbar(tv_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        scrollbar.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        
+        # <--- NOVO: BIND DE SELEÇÃO ---
+        # Chama 'on_mod_selected' quando o usuário clica em um item
+        self.tree.bind("<<TreeviewSelect>>", self.on_mod_selected)
+        
+        # --- Meio-Direita: Painel de Preview ---
+        preview_frame = ttk.Frame(middle_frame, padding=10, bootstyle="dark")
+        preview_frame.grid(row=0, column=1, sticky="nsew")
+        preview_frame.grid_propagate(False)
+        preview_frame.rowconfigure(1, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+
+        # Ícone Padrão (para o preview)
+        try:
+            img = Image.open(os.path.join(BASE_DIR, "default_pack.png")).resize((128, 128), Image.Resampling.LANCZOS)
+            self.default_mod_icon = ImageTk.PhotoImage(img)
+        except Exception:
+            img = Image.new('RGBA', (128, 128), (0,0,0,0))
+            self.default_mod_icon = ImageTk.PhotoImage(img)
+
+        self.preview_icon = ttk.Label(preview_frame, image=self.default_mod_icon, bootstyle="dark")
+        self.preview_icon.grid(row=0, column=0, pady=10)
+        
+        self.preview_desc = ttk.Label(preview_frame, text="Selecione um mod para ver a descrição.", wraplength=230, anchor="nw", bootstyle="dark")
+        self.preview_desc.grid(row=1, column=0, sticky="nsew", pady=10)
+        
+        # --- Fundo: Botões e Status ---
+        bottom_frame = ttk.Frame(main_frame)
+        bottom_frame.pack(fill="x", pady=(10, 0))
+        
+        self.status_label = ttk.Label(bottom_frame, text=f"Buscando mods populares para {self.game_version} ({self.loader})...")
+        self.status_label.pack(side="left")
+        
+        self.download_button = ttk.Button(bottom_frame, text="Baixar Selecionado", bootstyle="success-outline", command=self.start_download_thread)
+        self.download_button.pack(side="right")
+        
+        # <--- NOVO: Inicia a busca por mods populares ---
+        self.start_search_thread()
+
+    def set_status(self, text, style=INFO):
+        """Atualiza o label de status (thread-safe)."""
+        try:
+            self.status_label.config(text=text, bootstyle=style)
+        except tk.TclError:
+            pass # Janela foi fechada
+
+    # <--- NOVO: Thread para carregar o ícone ---
+    def _load_icon_thread(self, icon_url):
+        """(THREAD) Baixa o ícone de um mod e o exibe."""
+        try:
+            headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
+            resp = requests.get(icon_url, headers=headers)
+            resp.raise_for_status()
+            
+            # Usa o BytesIO para abrir a imagem a partir dos dados baixados
+            img_data = BytesIO(resp.content)
+            img = Image.open(img_data).resize((128, 128), Image.Resampling.LANCZOS)
+            
+            self.mod_icon_photo = ImageTk.PhotoImage(img)
+            
+            # Agenda a atualização da imagem na thread da UI
+            self.after(0, self.preview_icon.config, {"image": self.mod_icon_photo})
+            
+        except Exception as e:
+            print(f"Erro ao carregar ícone {icon_url}: {e}")
+            # Se falhar, volta para o ícone padrão
+            self.after(0, self.preview_icon.config, {"image": self.default_mod_icon})
+
+    # <--- NOVO: Função chamada ao clicar em um mod ---
+    def on_mod_selected(self, event=None):
+        """Chamado quando um item da lista é selecionado. Atualiza o painel de preview."""
+        sel = self.tree.selection()
+        if not sel: 
+            return
+            
+        project_id = sel[0]
+        
+        # Pega os dados que salvamos no mapa
+        mod_data = self.search_results_map.get(project_id)
+        if not mod_data:
+            return
+            
+        # 1. Atualiza a descrição
+        self.preview_desc.config(text=mod_data.get("description", "Sem descrição."))
+        
+        # 2. Inicia o thread para carregar o ícone
+        icon_url = mod_data.get("icon_url")
+        if icon_url:
+            threading.Thread(target=self._load_icon_thread, args=(icon_url,), daemon=True).start()
+        else:
+            # Se o mod não tem ícone, usa o padrão
+            self.preview_icon.config(image=self.default_mod_icon)
+
+    def start_search_thread(self, event=None):
+        """Inicia o thread de busca."""
+        query = self.search_entry.get().strip()
+        # <--- MUDANÇA AQUI: Não checa mais se a query é vazia
+            
+        self.set_status("Buscando...", INFO)
+        self.search_button.config(state="disabled")
+        self.tree.delete(*self.tree.get_children()) # Limpa a lista
+        self.search_results_map.clear() # Limpa o mapa de dados
+        
+        # Reseta o painel de preview
+        self.preview_icon.config(image=self.default_mod_icon)
+        self.preview_desc.config(text="Selecione um mod para ver a descrição.")
+        
+        threading.Thread(target=self._search_thread, args=(query,), daemon=True).start()
+
+    def _search_thread(self, query):
+        """(THREAD) Busca na API do Modrinth."""
+        try:
+            facets = f'[["project_type:mod"],["versions:{self.game_version}"],["categories:{self.loader}"]]'
+            
+            # <--- CORREÇÃO AQUI (Busca Popular) ---
+            if query:
+                # Se tem uma busca, usa a query
+                params = {"query": query, "facets": facets}
+            else:
+                # Se a busca é vazia, procura pelos mais baixados
+                params = {"sort": "downloads", "facets": facets}
+            # <--- FIM DA CORREÇÃO ---
+            
+            headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
+            
+            resp = requests.get("https://api.modrinth.com/v2/search", params=params, headers=headers)
+            resp.raise_for_status()
+            
+            data = resp.json()
+            hits = data.get("hits", []) # Pega os resultados
+            
+            # --- Atualiza a UI na thread principal ---
+            def update_ui_list():
+                if not hits:
+                    self.set_status("Nenhum mod encontrado.", WARNING)
+                    return
+                
+                for mod in hits:
+                    project_id = mod.get("project_id")
+                    if not project_id:
+                        continue
+                        
+                    # Adiciona na lista da UI
+                    self.tree.insert("", "end", iid=project_id, values=(
+                        mod.get("title", "N/A"),
+                        mod.get("author", "N/A")
+                        # (Removemos o resumo daqui, pois vai para o painel)
+                    ))
+                    
+                    # <--- NOVO: Salva os dados no mapa ---
+                    # Guardamos os dados para usar no painel de preview
+                    self.search_results_map[project_id] = {
+                        "description": mod.get("description", "Sem descrição."),
+                        "icon_url": mod.get("icon_url")
+                    }
+                
+                self.set_status(f"Mostrando {len(hits)} mods.", SUCCESS)
+
+            self.after(0, update_ui_list) # Agenda a atualização
+            
+        except Exception as e:
+            self.after(0, self.set_status, f"Erro na busca: {e}", DANGER)
+        finally:
+            self.after(0, self.search_button.config, {"state": "normal"})
+
+    def start_download_thread(self):
+        """Inicia o thread de download."""
+        sel = self.tree.selection()
+        if not sel: 
+            return messagebox.showerror("Erro", "Selecione um mod na lista para baixar.", parent=self)
+            
+        project_id = sel[0]
+        
+        self.set_status(f"Buscando versão para {project_id}...", INFO)
+        self.download_button.config(state="disabled")
+        
+        threading.Thread(target=self._download_thread, args=(project_id,), daemon=True).start()
+        
+    def _download_thread(self, project_id):
+        """(THREAD) Busca a versão correta do mod e baixa."""
+        try:
+            # 1. Busca as versões do projeto
+            headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
+            params = {
+                "loaders": json.dumps([self.loader]),
+                "game_versions": json.dumps([self.game_version])
+            }
+            
+            url = f"https://api.modrinth.com/v2/project/{project_id}/version"
+            resp = requests.get(url, params=params, headers=headers)
+            resp.raise_for_status()
+            
+            versions = resp.json()
+            if not versions:
+                raise Exception(f"Nenhuma versão compatível com {self.game_version} ({self.loader}) foi encontrada.")
+            
+            # 2. Pega a versão mais recente (a primeira da lista)
+            latest_version = versions[0]
+            
+            # 3. Pega o arquivo principal dessa versão
+            file_to_download = latest_version.get("files", [{}])[0]
+            file_url = file_to_download.get("url")
+            file_name = file_to_download.get("filename")
+            
+            if not file_url or not file_name:
+                raise Exception("API retornou uma versão sem arquivo.")
+            
+            # 4. Baixa o arquivo
+            self.set_status(f"Baixando {file_name}...")
+            
+            file_path = os.path.join(self.mods_dir, file_name)
+            self.launcher.download_file(file_url, file_path, file_name)
+            
+            self.after(0, self.set_status, f"✅ {file_name} baixado!", SUCCESS)
+
+        except Exception as e:
+            self.after(0, self.set_status, f"Erro ao baixar: {e}", DANGER)
+        finally:
+            self.after(0, self.download_button.config, {"state": "normal"})
+
 
 # --- Funções de Ajuda ---
 def offline_uuid_for(name: str) -> str:
@@ -66,7 +388,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v3.2.0"
+        self.LAUNCHER_VERSION = "v3.6.0"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -144,12 +466,8 @@ class RaposoLauncher(ttk.Window):
         
         controls_frame.grid_propagate(False) 
         
-        # <--- CORREÇÃO DO GRID ---
-        # Coluna 0: Labels (largura fixa)
         controls_frame.columnconfigure(0, weight=0, minsize=58) 
-        # Coluna 1: Widgets (expansível)
         controls_frame.columnconfigure(1, weight=1)
-        # <--- FIM DA CORREÇÃO ---
 
         # (Linha 0: Conta)
         ttk.Label(controls_frame, text="Conta:", font=("Helvetica", 11)).grid(row=0, column=0, sticky="w", pady=10, padx=(0, 10))
@@ -167,7 +485,6 @@ class RaposoLauncher(ttk.Window):
             img = Image.new('RGBA', (48, 48), (0,0,0,0))
             self.default_pack_icon = ImageTk.PhotoImage(img)
         
-        # O "porta-retrato"
         self.modpack_icon_label = ttk.Label(controls_frame, image=self.default_pack_icon)
         self.modpack_icon_label.grid(row=1, column=0, sticky="w", pady=10, padx=(0, 10))
 
@@ -177,20 +494,19 @@ class RaposoLauncher(ttk.Window):
         self.selection_combo.bind("<<ComboboxSelected>>", self.on_modpack_selected)
 
         # (Linha 2: Checkboxes)
-        # Criamos um frame SÓ para os checkboxes
         check_frame = ttk.Frame(controls_frame)
         check_frame.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10,0), padx=0)
 
         self.close_after_launch = tk.BooleanVar()
         check = ttk.Checkbutton(check_frame, text="Fechar launcher ao iniciar", variable=self.close_after_launch, command=self.on_checkbox_toggled)
-        check.pack(side="left") # Alinha um ao lado do outro
+        check.pack(side="left") 
 
         check_terminal = ttk.Checkbutton(check_frame, text="Iniciar com terminal", variable=self.show_terminal, command=self.on_checkbox_toggled)
-        check_terminal.pack(side="left", padx=(15, 0)) # Adiciona espaço entre eles
+        check_terminal.pack(side="left", padx=(15, 0)) 
         
         # (Linha 3: Barra de Botões) 
         button_frame = ttk.Frame(controls_frame)
-        button_frame.grid(row=3, column=0, columnspan=2, pady=(20, 10), sticky="ew") # <--- MUDANÇA (row 3)
+        button_frame.grid(row=3, column=0, columnspan=2, pady=(20, 10), sticky="ew")
         
         button_frame.columnconfigure((0, 1, 2), weight=1)
         
@@ -203,6 +519,11 @@ class RaposoLauncher(ttk.Window):
         ttk.Button(button_frame, text="📂 Abrir Pasta", bootstyle="secondary-outline", command=self.abrir_pasta_modpack).grid(row=1, column=0, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="📥 Importar", bootstyle="primary-outline", command=self.importar_modpack).grid(row=1, column=1, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="📤 Exportar", bootstyle="primary-outline", command=self.exportar_modpack).grid(row=1, column=2, sticky="ew", padx=2, pady=2)
+
+        # <--- ADIÇÃO AQUI ---
+        # Fileira 3 (O novo botão)
+        ttk.Button(button_frame, text="📥 Baixar Mods (Modrinth)", bootstyle="success-outline", command=self.open_mod_downloader).grid(row=2, column=0, columnspan=3, sticky="ew", padx=2, pady=2)
+        # <--- FIM DA ADIÇÃO ---
         
         # 4. Cria o Botão START
         self.start_button = ttk.Button(
@@ -240,6 +561,7 @@ class RaposoLauncher(ttk.Window):
             10, 590, text=self.LAUNCHER_VERSION, 
             font=("Helvetica", 9), fill=subtle_color, anchor="sw" 
         )
+
 
     def _discord_rpc_thread(self):
         """(THREAD) Controla a conexão e atualização do Discord Rich Presence."""
@@ -400,6 +722,24 @@ class RaposoLauncher(ttk.Window):
             self.bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
         except Exception as e:
             messagebox.showerror("Erro ao Carregar Imagem", f"Ocorreu um erro: {e}")
+
+    def open_mod_downloader(self):
+        """Abre a janela de download de mods."""
+        
+        # 1. Pega o modpack selecionado
+        modpack_name = self.selection_combo.get().strip()
+        if not modpack_name:
+            return messagebox.showerror("Erro", "Selecione um modpack primeiro!")
+        
+        # 2. Pega a config desse modpack
+        config = self.load_modpack_config(modpack_name)
+        version_str = config.get("version")
+        
+        if not version_str:
+             return messagebox.showerror("Erro", "O modpack selecionado não tem uma versão definida!")
+
+        # 3. Abre a nova janela
+        ModDownloader(self, self, modpack_name, config)
 
     # ---------------------------
     # Java
@@ -2020,22 +2360,20 @@ class RaposoLauncher(ttk.Window):
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
             }
             
-            # Usa o 'headers' na requisição
-            response = requests.get(url, stream=True, headers=headers)
-            # <--- FIM DA CORREÇÃO ---
-            
-            response.raise_for_status()
-            
-            with open(path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            # <--- MUDANÇA AQUI: Usar 'with' para garantir que a ligação fecha ---
+            with requests.get(url, stream=True, headers=headers) as response:
+                response.raise_for_status()
+                
+                with open(path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            # --- FIM DA MUDANÇA ---
             
             return filename 
             
         except Exception as e:
             print(f"[DOWNLOAD] FALHA ao baixar {filename}: {e}")
             raise e
-
 
     def download_assets(self, asset_index_path):
         """Lê o asset_index.json e baixa todos os assets (Thread-safe)."""
@@ -2130,35 +2468,15 @@ class RaposoLauncher(ttk.Window):
                 self.load_selections()
                 messagebox.showinfo(message.get("title", "Sucesso"), message.get("text", "Operação concluída."))
             
+            # --- ESTE BLOCO FOI REMOVIDO ---
+            # elif msg_type == "launch_game":
+            #     ... (Toda a lógica de Popen e _wait_for_game_close_thread foi movida) ...
             
-            elif msg_type == "launch_game":
-                command = message.get("command")
-                cwd = message.get("cwd")
-                
-                print("[DEBUG] (UI Thread) Fila processada. Iniciando o jogo...")
-
-                show_terminal = self.show_terminal.get()
-                
-                if not show_terminal and platform.system().lower() == "windows":
-                    creation_flags = 0x08000000
-                    # Salva a referência do processo
-                    self.game_process = subprocess.Popen(command, cwd=cwd, creationflags=creation_flags)
-                    print("[DEBUG] Iniciando no Windows sem terminal.")
-                else:
-                    # Salva a referência do processo
-                    self.game_process = subprocess.Popen(command, cwd=cwd)
-                    print("[DEBUG] Iniciando com terminal (Padrão ou não-Windows).")
-                
-                self.status_label.config(text=message.get("text"), bootstyle=SUCCESS)
-                
-                # --- LÓGICA DE ESCONDER (NÃO FECHAR) ---
-                if self.close_after_launch.get():
-                    print("[DEBUG] Escondendo o launcher...")
-                    self.withdraw() # Esconde a janela
-                    
-                    # Inicia o thread "vigia"
-                    threading.Thread(target=self._wait_for_game_close_thread, args=(self.game_process,), daemon=True).start()
-
+            # --- ESTE BLOCO FOI ADICIONADO ---
+            elif msg_type == "hide_launcher":
+                print("[DEBUG] (UI Thread) Escondendo a janela.")
+                self.withdraw()
+            
             # <--- CORREÇÃO AQUI ---
             elif msg_type == "show_launcher":
                 print("[DEBUG] Reabrindo o launcher...")
@@ -2232,23 +2550,19 @@ class RaposoLauncher(ttk.Window):
             version_json = os.path.join(version_dir, f"{version}.json")
             
             if not os.path.exists(version_json):
-                # Se não existir, verifica se é uma versão vanilla
                 is_vanilla = "forge" not in version.lower() and \
                              "fabric" not in version.lower() and \
                              "optifine" not in version.lower()
                 
-                # Só tenta baixar se for vanilla
                 if is_vanilla:
                     try:
                         print(f"[DEBUG] Tentando baixar .json vanilla para {version}")
-                        self._ensure_vanilla_json_exists(version) # Usa nossa função ajudante
+                        self._ensure_vanilla_json_exists(version) 
                     except Exception as e:
                         raise FileNotFoundError(f"Falha ao baixar o JSON '{version}' da Mojang: {e}")
                 else:
-                    # Se for um mod (Forge, OptiFine) e estiver faltando, é um erro de instalação
                     raise FileNotFoundError(f"JSON '{version}' não encontrado! A versão foi instalada corretamente na pasta 'game/versions'?")
             
-            # Se chegamos aqui, o JSON existe (ou foi baixado)
             with open(version_json, "r", encoding="utf-8") as f: child_data = json.load(f)
                  
             parent_version = child_data.get("inheritsFrom")
@@ -2258,7 +2572,6 @@ class RaposoLauncher(ttk.Window):
             if parent_version:
                 parent_json_path = os.path.join(VERSIONS_DIR, parent_version, f"{parent_version}.json")
                 if not os.path.exists(parent_json_path):
-                    # Se o pai não existe, tenta baixar (ele DEVE ser vanilla)
                     try:
                         self._ensure_vanilla_json_exists(parent_version)
                     except Exception as e:
@@ -2270,7 +2583,6 @@ class RaposoLauncher(ttk.Window):
             
             tasks_to_download = [] 
 
-            # Re-lê os arquivos após os downloads
             with open(version_json, "r", encoding="utf-8") as f: child_data = json.load(f)
             if parent_json_path and os.path.exists(parent_json_path):
                 with open(parent_json_path, "r", encoding="utf-8") as f: parent_data = json.load(f)
@@ -2312,16 +2624,6 @@ class RaposoLauncher(ttk.Window):
                 
                 if artifact and artifact.get("path"):
                     lib_path_str = artifact.get("path")
-                    lib_path = os.path.join(LIBRARIES_DIR, lib_path_str)
-                    url = artifact.get("url")
-                    filename = lib_path_str.split('/')[-1]
-                
-                elif downloads.get("path") and not classifiers and not natives:
-                     lib_path_str = downloads.get("path")
-                     lib_path = os.path.join(LIBRARIES_DIR, lib_path_str)
-                     url = downloads.get("url")
-                     filename = lib_path_str.split('/')[-1]
-                
                 elif not artifact and not classifiers and not natives:
                     try: 
                         parts = lib_name.split(':')
@@ -2329,22 +2631,35 @@ class RaposoLauncher(ttk.Window):
                         name = parts[1]
                         ver = parts[2]
                         classifier = f"-{parts[3]}" if len(parts) > 3 else ""
-                        
                         filename = f"{name}-{ver}{classifier}.jar"
                         lib_path_str = f"{group}/{name}/{ver}/{filename}"
-                        lib_path = os.path.join(LIBRARIES_DIR, lib_path_str)
-                        
-                        url = f"https://libraries.minecraft.net/{lib_path_str}"
-                        if "net.minecraftforge" in url:
-                            url = f"https://maven.minecraftforge.net/{lib_path_str}"
                     except Exception as e:
                         print(f"[DEBUG] Falha ao construir caminho para {lib_name}: {e}")
-                        continue 
-                
-                if lib_path and not os.path.exists(lib_path):
-                    if not url: 
-                         url = f"https://libraries.minecraft.net/{lib_path_str}"
-                    tasks_to_download.append((url, lib_path, filename))
+                        continue
+                else:
+                    pass
+
+                if lib_path_str:
+                    lib_path = os.path.join(LIBRARIES_DIR, lib_path_str)
+                    filename = lib_path_str.split('/')[-1]
+
+                    custom_repo_url = lib.get("url") 
+                    
+                    if custom_repo_url:
+                        url = custom_repo_url.rstrip('/') + '/' + lib_path_str
+                    elif artifact and artifact.get("url"):
+                        url = artifact.get("url")
+                    else:
+                        if "net.minecraftforge" in lib_path_str:
+                            url = f"https://maven.minecraftforge.net/{lib_path_str}"
+                        else:
+                            url = f"https://libraries.minecraft.net/{lib_path_str}"
+
+                    if lib_path and not os.path.exists(lib_path):
+                        if not url:
+                            print(f"[AVISO] URL não encontrado para {lib_name}, pulando download.")
+                            continue
+                        tasks_to_download.append((url, lib_path, filename))
                 
                 if classifiers or natives:
                     os_name = platform.system().lower()
@@ -2463,6 +2778,8 @@ class RaposoLauncher(ttk.Window):
             natives_dir = self.extract_natives(version_data, version)
 
             # --- 7. Preparar Argumentos ---
+            self.ui_queue.put({"type": "status", "text": "Preparando argumentos..."})
+            
             main_class = version_data.get("mainClass")
             if not main_class: raise Exception("mainClass não encontrado no JSON")
             
@@ -2566,6 +2883,10 @@ class RaposoLauncher(ttk.Window):
                                 values_to_add = [arg_entry]
                             
                             for v in values_to_add:
+                                 if "net.minecraft.client.main.Main" in v:
+                                     print(f"[DEBUG] Ignorando argumento JVM problemático: {v}")
+                                     continue 
+                                 
                                  jvm_args.append(self.replace_arg(v, replacements))
                 
                 if is_modern_forge or is_modern_fabric:
@@ -2596,21 +2917,16 @@ class RaposoLauncher(ttk.Window):
                         game_args.extend(["--assetsDir", ASSETS_DIR])
                         game_args.extend(["--assetIndex", asset_index])
                 
-                # <--- CORREÇÃO AQUI (Bug do Forge Moderno) ---
-                # O JSON do Forge Moderno omite os argumentos de jogo básicos.
-                # Precisamos adicioná-los manualmente, assim como fizemos com o Fabric.
                 if is_modern_forge:
                     print("[DEBUG] Adicionando argumentos de jogo manualmente para o Forge Moderno.")
                     game_args.extend(["--username", username])
                     game_args.extend(["--uuid", use_uuid])
                     game_args.extend(["--accessToken", access_token])
-                    game_args.extend(["--version", version]) # O erro que vimos!
+                    game_args.extend(["--version", version]) 
                     game_args.extend(["--gameDir", game_dir])
                     game_args.extend(["--assetsDir", ASSETS_DIR])
                     game_args.extend(["--assetIndex", asset_index])
-                    game_args.extend(["--userType", "legacy"]) # (usamos "legacy" para offline)
-                # <--- FIM DA CORREÇÃO ---
-
+                    game_args.extend(["--userType", "legacy"]) 
             else:
                 raise Exception("Formato de JSON desconhecido! Não foi encontrado 'arguments' nem 'minecraftArguments'.")
             
@@ -2622,13 +2938,44 @@ class RaposoLauncher(ttk.Window):
             print(f"\n[DEBUG] Argumentos JVM Finais: {' '.join(jvm_args)}\n") 
             print(f"\n[DEBUG] Argumentos de Jogo Finais: {' '.join(game_args)}\n")
             
-            self.ui_queue.put({
-                "type": "launch_game", 
-                "command": command, 
-                "cwd": GAME_DIR,
-                "text": f"✅ {version} iniciado!"
-            })
-        
+            self.ui_queue.put({"type": "status", "text": "🚀 Iniciando o jogo..."})
+            
+            # --- INÍCIO DA NOVA LÓGICA DE INICIALIZAÇÃO ---
+            
+            show_terminal = self.show_terminal.get()
+            creation_flags = 0
+            
+            if not show_terminal and platform.system().lower() == "windows":
+                creation_flags = 0x08000000 
+                print("[DEBUG] (BG Thread) Iniciando no Windows sem terminal.")
+            else:
+                print("[DEBUG] (BG Thread) Iniciando com terminal (Padrão ou não-Windows).")
+
+            # Inicia o jogo A PARTIR DO BACKGROUND THREAD (para não congelar a UI)
+            self.game_process = subprocess.Popen(
+                command, 
+                cwd=GAME_DIR, 
+                creationflags=creation_flags
+            )
+
+            # Envia a mensagem de sucesso para a UI
+            self.ui_queue.put({"type": "status", "text": f"✅ {version} iniciado!", "style": SUCCESS})
+            
+            # Se a opção de fechar estiver marcada, esta thread fica "viva"
+            if self.close_after_launch.get():
+                print("[DEBUG] (BG Thread) Escondendo o launcher...")
+                self.ui_queue.put({"type": "hide_launcher"}) # Nova mensagem
+                
+                print("[DEBUG] (BG Thread) Esperando o jogo fechar...")
+                self.game_process.wait() # Trava ESTE thread (o de background)
+                
+                print("[DEBUG] (BG Thread) Jogo fechado. Solicitando reabertura...")
+                self.ui_queue.put({"type": "show_launcher"})
+            
+            # Limpa a referência
+            self.game_process = None
+            # --- FIM DA NOVA LÓGICA DE INICIALIZAÇÃO ---
+
         except Exception as e:
             error_message = f"Erro: {e}"
             self.ui_queue.put({"type": "status", "text": error_message, "style": DANGER})
@@ -2640,6 +2987,7 @@ class RaposoLauncher(ttk.Window):
         finally:
             self.ui_queue.put({"type": "progress_stop"})
             self.ui_queue.put({"type": "button_toggle", "state": "normal"})
+
 
 # --- Ponto de Entrada da Aplicação ---
 if __name__ == "__main__":
