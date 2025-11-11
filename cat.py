@@ -52,7 +52,7 @@ class ModDownloader(tk.Toplevel):
         self.launcher = launcher_instance
         self.modpack_name = modpack_name
         
-        self.LAUNCHER_VERSION = "v3.2.0"
+        self.LAUNCHER_VERSION = "v3.9.0"
 
         # Onde salvar os mods
         self.mods_dir = os.path.join(MODPACKS_DIR, modpack_name, "mods")
@@ -3029,3 +3029,4 @@ if __name__ == "__main__":
     
     app = RaposoLauncher()
     app.mainloop()
+
