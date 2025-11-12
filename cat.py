@@ -50,8 +50,8 @@ class ModDownloader(tk.Toplevel):
     def __init__(self, parent, launcher_instance, modpack_name, modpack_config):
         super().__init__(parent)
         self.title(f"Baixar Mods para: {modpack_name}")
-        self.geometry("900x600") # <--- Aumentamos a janela
-        self.resizable(True, True) # <--- Deixamos redimensionável
+        self.geometry("900x600") 
+        self.resizable(True, True) 
         self.grab_set()
         
         # Guarda referências importantes
@@ -105,6 +105,10 @@ class ModDownloader(tk.Toplevel):
         self.selected_project_id = None
         self.selected_frame = None
         
+        # --- NOVO: Variáveis de Paginação ---
+        self.current_offset = 0
+        self.hits_per_page = 20 # O Modrinth usa 20 como padrão
+        
         # Carrega o ícone padrão (64x64)
         try:
             img = Image.open(os.path.join(BASE_DIR, "default_pack.png")).resize((64, 64), Image.Resampling.LANCZOS)
@@ -124,11 +128,12 @@ class ModDownloader(tk.Toplevel):
         self.search_entry = ttk.Entry(search_frame)
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
         
-        self.search_button = ttk.Button(search_frame, text="Buscar", command=self.start_search_thread)
+        # --- MUDANÇA: Atualiza o command ---
+        self.search_button = ttk.Button(search_frame, text="Buscar", command=lambda: self.start_search_thread(offset_change=0))
         self.search_button.pack(side="right")
-        self.search_entry.bind("<Return>", self.start_search_thread)
+        self.search_entry.bind("<Return>", lambda e: self.start_search_thread(offset_change=0))
         
-        # --- Meio: Lista de Mods Rolável (A GRANDE MUDANÇA) ---
+        # --- Meio: Lista de Mods Rolável (Sem mudanças) ---
         
         # 1. O Frame principal que segura o canvas e a scrollbar
         scroll_frame = ttk.Frame(main_frame)
@@ -160,13 +165,31 @@ class ModDownloader(tk.Toplevel):
         bottom_frame.pack(fill="x", pady=(10, 0))
         
         self.status_label = ttk.Label(bottom_frame, text=f"Buscando mods populares para {self.game_version} ({self.loader})...")
-        self.status_label.pack(side="left")
+        self.status_label.pack(side="left", fill="x", expand=True) # expand=True para empurrar os botões
+        
+        # --- NOVO: Botões de Paginação ---
+        self.prev_page_button = ttk.Button(
+            bottom_frame, 
+            text="< Anterior", 
+            state="disabled", 
+            command=lambda: self.start_search_thread(offset_change=-self.hits_per_page)
+        )
+        self.prev_page_button.pack(side="left", padx=5)
+        
+        self.next_page_button = ttk.Button(
+            bottom_frame, 
+            text="Próxima >", 
+            state="disabled", 
+            command=lambda: self.start_search_thread(offset_change=self.hits_per_page)
+        )
+        self.next_page_button.pack(side="left", padx=5)
+        # --- FIM DAS NOVIDADES ---
         
         self.download_button = ttk.Button(bottom_frame, text="Baixar Selecionado", bootstyle="success-outline", command=self.start_download_thread)
         self.download_button.pack(side="right")
         
-        # Inicia a busca por mods populares
-        self.start_search_thread()
+        # Inicia a busca por mods populares (offset_change=0 para começar do zero)
+        self.start_search_thread(offset_change=0)
 
     # --- Funções Auxiliares para a Lista Rolável ---
 
@@ -297,13 +320,30 @@ class ModDownloader(tk.Toplevel):
         for widget in mod_frame.winfo_children() + stats_frame.winfo_children():
             widget.bind("<Button-1>", click_func)
 
-    def start_search_thread(self, event=None):
-        """Inicia o thread de busca."""
+    def start_search_thread(self, event=None, offset_change=0):
+        """Inicia o thread de busca, com suporte a offset."""
         query = self.search_entry.get().strip()
+        
+        # --- LÓGICA DE OFFSET ---
+        if offset_change == 0:
+            # Se é uma nova busca (offset_change=0), reseta o offset
+            self.current_offset = 0
+        else:
+            # Se é mudança de página, calcula o novo offset
+            self.current_offset += offset_change
+        
+        # Garante que o offset não seja negativo
+        if self.current_offset < 0:
+            self.current_offset = 0
+        # --- FIM DA LÓGICA ---
             
-        self.set_status("Buscando...", INFO)
+        self.set_status(f"Buscando (Página {self.current_offset // self.hits_per_page + 1})...", INFO)
+        
+        # Desabilita TODOS os botões de navegação
         self.search_button.config(state="disabled")
-        self.download_button.config(state="disabled") # Desabilita o download
+        self.download_button.config(state="disabled") 
+        self.next_page_button.config(state="disabled")
+        self.prev_page_button.config(state="disabled")
         
         # Limpa o estado da seleção
         self.selected_project_id = None
@@ -313,10 +353,13 @@ class ModDownloader(tk.Toplevel):
         for child in self.list_frame.winfo_children():
             child.destroy()
         
-        threading.Thread(target=self._search_thread, args=(query,), daemon=True).start()
+        # Reposiciona o scroll para o topo
+        self.canvas.yview_moveto(0)
+        
+        threading.Thread(target=self._search_thread, args=(query, self.current_offset), daemon=True).start()
 
-    def _search_thread(self, query):
-        """(THREAD) Busca na API do Modrinth."""
+    def _search_thread(self, query, offset):
+        """(THREAD) Busca na API do Modrinth, com suporte a offset."""
         try:
             # Adiciona 'neoforge' aos loaders
             loaders_facet = [self.loader]
@@ -325,10 +368,22 @@ class ModDownloader(tk.Toplevel):
                 
             facets = f'[["project_type:mod"],["versions:{self.game_version}"],{json.dumps(["categories:" + l for l in loaders_facet])}]'
             
+            # --- PARÂMETROS ATUALIZADOS ---
             if query:
-                params = {"query": query, "facets": facets}
+                params = {
+                    "query": query, 
+                    "facets": facets, 
+                    "offset": offset, 
+                    "limit": self.hits_per_page
+                }
             else:
-                params = {"sort": "downloads", "facets": facets}
+                params = {
+                    "sort": "downloads", 
+                    "facets": facets, 
+                    "offset": offset, 
+                    "limit": self.hits_per_page
+                }
+            # --- FIM DA ATUALIZAÇÃO ---
             
             headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
             
@@ -341,20 +396,34 @@ class ModDownloader(tk.Toplevel):
             # --- Atualiza a UI na thread principal ---
             def _populate_mod_list():
                 if not hits:
-                    self.set_status("Nenhum mod encontrado.", WARNING)
+                    self.set_status("Nenhum mod encontrado nesta página.", WARNING)
+                    # Habilita "Anterior" se não estivermos na primeira página
+                    if self.current_offset > 0:
+                        self.prev_page_button.config(state="normal")
                     return
                 
                 # Cria um "card" para cada mod
                 for mod_data in hits:
                     self._create_mod_widget(mod_data)
                 
-                self.set_status(f"Mostrando {len(hits)} mods.", SUCCESS)
+                self.set_status(f"Mostrando {len(hits)} mods (Página {self.current_offset // self.hits_per_page + 1}).", SUCCESS)
+
+                # --- LÓGICA DE HABILITAR BOTÕES ---
+                
+                # Habilita "Próxima" APENAS se a API retornou uma página cheia
+                if len(hits) == self.hits_per_page:
+                    self.next_page_button.config(state="normal")
+                
+                # Habilita "Anterior" se não estivermos na primeira página
+                if self.current_offset > 0:
+                    self.prev_page_button.config(state="normal")
 
             self.after(0, _populate_mod_list) # Agenda a atualização
             
         except Exception as e:
             self.after(0, self.set_status, f"Erro na busca: {e}", DANGER)
         finally:
+            # Reabilita o botão de buscar em qualquer caso
             self.after(0, self.search_button.config, {"state": "normal"})
 
     def start_download_thread(self):
@@ -379,7 +448,11 @@ class ModDownloader(tk.Toplevel):
                 "game_versions": json.dumps([self.game_version])
             }
             
-            url = f"https.api.modrinth.com/v2/project/{project_id}/version"
+            # --- CORREÇÃO AQUI ---
+            # Trocado "httpss.api..." por "https://api..."
+            url = f"https://api.modrinth.com/v2/project/{project_id}/version"
+            # --- FIM DA CORREÇÃO ---
+            
             resp = requests.get(url, params=params, headers=headers)
             resp.raise_for_status()
             
@@ -450,7 +523,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.4.0"
+        self.LAUNCHER_VERSION = "v4.4.1"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -507,6 +580,7 @@ class RaposoLauncher(ttk.Window):
         
         # 6. Inicia a fila da UI
         self.process_ui_queue()
+
 
     def build_ui(self):
         """Constrói a nova interface gráfica com a barra de progresso."""
@@ -1153,6 +1227,36 @@ class RaposoLauncher(ttk.Window):
         # Se não encontrar nenhum padrão (ex: "fabric-loader...", "a1.0.16"), 
         # retorna uma chave "muito baixa" para que eles fiquem no final.
         return (0, 0, 0)
+
+    def _get_pretty_version_name(self, real_name):
+        """Converte um nome de pasta de versão (ex: 1.12.2-forge...) em um nome legível (ex: 1.12.2 (Forge))."""
+        
+        name_low = real_name.lower()
+        loader = ""
+        
+        # 1. Detecta o loader
+        if "neoforge" in name_low:
+            loader = "NeoForge"
+        elif "forge" in name_low:
+            loader = "Forge"
+        elif "fabric" in name_low:
+            loader = "Fabric"
+        elif "optifine" in name_low:
+            loader = "OptiFine"
+        
+        # 2. Tenta extrair a versão base (ex: 1.12.2)
+        match = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', real_name)
+        
+        if match:
+            base_version = match.group(0) # Pega a string inteira (ex: "1.12.2")
+            if loader:
+                return f"{base_version} ({loader})"
+            else:
+                return f"{base_version} (Vanilla)"
+        else:
+            # Se o regex falhar, apenas retorna o nome original como fallback
+            return real_name
+
 
     def open_version_downloader(self, parent_dialog, version_combo):
         """Abre uma nova janela para baixar manifestos de versão da Mojang."""
@@ -1926,21 +2030,52 @@ class RaposoLauncher(ttk.Window):
             name_entry = ttk.Entry(frame)
             name_entry.grid(row=0, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0)) # columnspan 2
             
-        # --- Versão ---
+        # --- Versão (INÍCIO DAS MUDANÇAS) ---
         ttk.Label(frame, text="Versão:", font=("Helvetica", 11)).grid(row=1, column=0, sticky="w", pady=6)
         
-        versions_list = [v for v in os.listdir(VERSIONS_DIR) if os.path.isdir(os.path.join(VERSIONS_DIR,v))]
-        versions = sorted(versions_list, key=self._version_key, reverse=True)
+        # 1. Pega os nomes reais (como antes)
+        real_versions_list = [v for v in os.listdir(VERSIONS_DIR) if os.path.isdir(os.path.join(VERSIONS_DIR,v))]
+        real_versions_sorted = sorted(real_versions_list, key=self._version_key, reverse=True)
         
-        version_combo = ttk.Combobox(frame, values=versions, state="readonly")
+        # 2. Cria o mapeamento e a lista de nomes bonitos
+        # Usamos 'dialog.version_mapping' para que a func 'confirmar' possa acessá-lo
+        dialog.version_mapping = {} 
+        display_versions = []
         
-        saved_version = current_config.get("version")
-        if saved_version in versions:
-            version_combo.set(saved_version)
-        elif versions:
-            version_combo.set(versions[-1]) # Pega a mais antiga se nada estiver salvo
+        for real_name in real_versions_sorted:
+            pretty_name = self._get_pretty_version_name(real_name)
+            
+            # Lida com nomes bonitos duplicados (ex: duas "1.20.1 (Forge)")
+            if pretty_name in dialog.version_mapping:
+                # Adiciona um sufixo para desambiguar
+                pretty_name_amb = f"{pretty_name} [{real_name[-6:]}]" # ex: "1.20.1 (Forge) [47.1.3]"
+                dialog.version_mapping[pretty_name_amb] = real_name
+                display_versions.append(pretty_name_amb)
+            else:
+                dialog.version_mapping[pretty_name] = real_name
+                display_versions.append(pretty_name)
+
+        # 3. Popula o combobox com os nomes bonitos
+        version_combo = ttk.Combobox(frame, values=display_versions, state="readonly")
+        
+        # 4. Define o valor salvo (lógica de "lookup" reverso)
+        saved_real_version = current_config.get("version")
+        if saved_real_version:
+            # Precisamos encontrar o nome bonito que corresponde ao nome real salvo
+            saved_display_name = next(
+                (display for display, real in dialog.version_mapping.items() if real == saved_real_version), 
+                None
+            )
+            if saved_display_name in display_versions:
+                version_combo.set(saved_display_name)
+        
+        # Se nada foi definido, define o primeiro da lista
+        if not version_combo.get() and display_versions:
+            version_combo.set(display_versions[0])
             
         version_combo.grid(row=1, column=1, sticky="ew", pady=6, padx=(10, 6)) # Coluna 1
+        
+        # --- FIM DAS MUDANÇAS NA SEÇÃO "VERSÃO" ---
         
         # --- Botão de Download ---
         download_btn = ttk.Button(
@@ -1985,7 +2120,12 @@ class RaposoLauncher(ttk.Window):
             else:
                 modpack_name = name_entry.get().strip()
             
-            version_str = version_combo.get().strip()
+            # --- MUDANÇA AQUI ---
+            display_str = version_combo.get().strip()
+            # Pega o nome real (ex: "1.8.9-forge...") usando o nome bonito (ex: "1.8.9 (Forge)")
+            version_str = dialog.version_mapping.get(display_str)
+            # --- FIM DA MUDANÇA ---
+            
             java_str = java_combo_dialog.get().strip()
             ram_str = ram_combo_dialog.get().strip()
 
@@ -1998,15 +2138,12 @@ class RaposoLauncher(ttk.Window):
             if not edit and os.path.exists(os.path.join(MODPACKS_DIR, modpack_name)):
                 return messagebox.showerror("Erro","Já existe um modpack com esse nome!", parent=dialog)
             
-            # <--- CORREÇÃO AQUI ---
-            # Adiciona o nome do modpack no JSON
             config_data = {
                 "name": modpack_name,
-                "version": version_str,
+                "version": version_str, # <- Salva o nome real e complexo!
                 "java": java_str,
                 "ram": ram_str
             }
-            # <--- FIM DA CORREÇÃO ---
             
             self.save_modpack_config(modpack_name, config_data)
                 
@@ -2016,7 +2153,7 @@ class RaposoLauncher(ttk.Window):
             dialog.destroy()
 
         # --- ESTE É O ÚNICO BOTÃO "CONFIRMAR" ---
-        ttk.Button(frame, text="Confirmar", bootstyle="success", command=confirmar).grid(row=4, column=0, columnspan=3, pady=20) # columnspan 3
+        ttk.Button(frame, text="Confirmar", bootstyle="success", command=confirmar).grid(row=4, column=0, columnspan=3, pady=20) # columnspan 3%
 
     def on_modpack_selected(self, event=None):
         """Salva o modpack e ATUALIZA O ÍCONE."""
@@ -2942,11 +3079,13 @@ class RaposoLauncher(ttk.Window):
             self.ui_queue.put({"type": "status", "text": "Construindo classpath..."})
             self.ui_queue.put({"type": "progress_start_indeterminate"}) 
             
-            classpath_list = []
+            # --- MUDANÇA AQUI: Trocado '[]' por 'set()' ---
+            classpath_set = set()
             processed_libs = set() 
 
-            if os.path.exists(main_jar): classpath_list.append(main_jar)
-            if parent_jar and os.path.exists(parent_jar): classpath_list.append(parent_jar)
+            # --- MUDANÇA AQUI: Trocado '.append()' por '.add()' ---
+            if os.path.exists(main_jar): classpath_set.add(main_jar)
+            if parent_jar and os.path.exists(parent_jar): classpath_set.add(parent_jar)
 
             for lib in version_data.get("libraries", []):
                 lib_name = lib.get("name", "NOME_DESCONHECIDO")
@@ -2982,9 +3121,11 @@ class RaposoLauncher(ttk.Window):
                         continue 
                 
                 if lib_path and os.path.exists(lib_path):
-                    classpath_list.append(lib_path)
+                    # --- MUDANÇA AQUI: Trocado '.append()' por '.add()' ---
+                    classpath_set.add(lib_path)
             
-            classpath_str = (";" if os.name == "nt" else ":").join(classpath_list)
+            # --- MUDANÇA AQUI: Trocado 'classpath_list' por 'classpath_set' ---
+            classpath_str = (";" if os.name == "nt" else ":").join(classpath_set)
 
             # --- 6. Extrair Natives ---
             self.ui_queue.put({"type": "status", "text": "Extraindo nativos..."})
