@@ -29,14 +29,16 @@ except ImportError:
     exit() # Fecha o script
 
 BASE_DIR = os.path.dirname(__file__)
-GAME_DIR = os.path.join(BASE_DIR, "game")
-VERSIONS_DIR = os.path.join(GAME_DIR, "versions")
-LIBRARIES_DIR = os.path.join(GAME_DIR, "libraries")
-ASSETS_DIR = os.path.join(GAME_DIR, "assets")
 MODPACKS_DIR = os.path.join(BASE_DIR, "modpacks")
 ACCOUNTS_FILE = os.path.join(BASE_DIR, "accounts.json")
 JAVA_ROOT = os.path.join(BASE_DIR, "java")
 SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+
+# As variáveis de JOGO (GAME_DIR, etc.) são definidas dentro da classe agora
+GAME_DIR = None
+VERSIONS_DIR = None
+LIBRARIES_DIR = None
+ASSETS_DIR = None
 
 class ModDownloader(tk.Toplevel):
     """Uma janela Toplevel para pesquisar e baixar mods do Modrinth."""
@@ -388,47 +390,62 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.0.1"
+        self.LAUNCHER_VERSION = "v4.3.0"
         self.logo_clicks = 0
         
         self.bg_photo = None
         self.bg_canvas = None
         self.logo_photo = None 
         
-        # <--- ADIÇÃO AQUI ---
-        self.modpack_icon_label = None # O "porta-retrato"
-        self.modpack_icon_photo = None # A referência da imagem (importante!)
-        self.default_pack_icon = None  # O ícone padrão
-        # <--- FIM DA ADIÇÃO ---
+        self.modpack_icon_label = None 
+        self.modpack_icon_photo = None 
+        self.default_pack_icon = None
         
         self.progressbar = None    
         self.start_button = None   
         self.ui_queue = Queue()    
+        
+        # --- MUDANÇA: Inicializa as BooleanVars aqui ---
         self.show_terminal = tk.BooleanVar() 
-
+        self.close_after_launch = tk.BooleanVar()
+        # --- FIM DA MUDANÇA ---
+        
+        self.use_default_minecraft_dir = False # Padrão
+        
         # --- LÓGICA DE JOGO/DISCORD ---
-        self.discord_client_id = "1436820336816427213" # (O seu ID vai aqui)
+        self.discord_client_id = "1436820336816427213"
         self.RPC = None
         self.game_process = None
         self.discord_state = "No menu principal"
         self.discord_details = "Escolhendo um modpack..."
-        
-        # --- MUDANÇA AQUI ---
-        # Definimos como None para não mostrar nada
         self.discord_small_image = None 
         self.discord_small_text = "Raposo Launcher"
-        # --- FIM DA MUDANÇA ---
         
         threading.Thread(target=self._discord_rpc_thread, daemon=True).start()
         
         self.bind("<Destroy>", self._on_close)
 
+        # --- MUDANÇA: Ordem de inicialização corrigida ---
+        
+        # 1. Carrega as configs (define self.use_default_minecraft_dir, etc.)
+        # Esta função agora também ATUALIZA o settings.json se a chave faltar
+        self.load_settings() 
+        
+        # 2. Define os caminhos de jogo com base nas configs
+        self._update_paths()
+        
+        # 3. Constrói a UI
         self.build_ui()
+        
+        # 4. Carrega o resto (Java, Contas, Modpacks)
         self.load_javas()
         self.load_accounts()
         self.load_selections()
-        self.load_settings()
         
+        # 5. Define o modpack salvo (agora que o combobox existe)
+        self.load_last_modpack_selection()
+        
+        # 6. Inicia a fila da UI
         self.process_ui_queue()
 
     def build_ui(self):
@@ -1973,6 +1990,71 @@ class RaposoLauncher(ttk.Window):
         modpack_name = self.selection_combo.get()
         self.save_settings(modpack_name)
 
+    def _get_default_minecraft_path(self):
+        """Retorna o caminho padrão do .minecraft dependendo do SO."""
+        system = platform.system().lower()
+        if system == "windows":
+            path = os.path.join(os.getenv('APPDATA'), '.minecraft')
+        elif system == "darwin": # macOS
+            path = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'minecraft')
+        else: # Linux
+            path = os.path.join(os.path.expanduser('~'), '.minecraft')
+        
+        # Garante que ele exista, como você pediu
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _update_paths(self):
+        """
+        (RE)DEFINE as variáveis GLOBAIS de caminho (GAME_DIR, etc.)
+        baseado na configuração 'self.use_default_minecraft_dir'.
+        """
+        # Diz ao Python que estamos mudando as variáveis GLOBAIS
+        global GAME_DIR, VERSIONS_DIR, LIBRARIES_DIR, ASSETS_DIR
+        
+        if self.use_default_minecraft_dir:
+            print("[DEBUG] Usando diretório padrão do .minecraft")
+            GAME_DIR = self._get_default_minecraft_path()
+        else:
+            print("[DEBUG] Usando diretório local 'game'")
+            GAME_DIR = os.path.join(BASE_DIR, "game")
+
+        # Redefine os outros caminhos com base no GAME_DIR que acabamos de setar
+        VERSIONS_DIR = os.path.join(GAME_DIR, "versions")
+        LIBRARIES_DIR = os.path.join(GAME_DIR, "libraries")
+        ASSETS_DIR = os.path.join(GAME_DIR, "assets")
+        
+        # Garante que os diretórios existam
+        os.makedirs(GAME_DIR, exist_ok=True)
+        os.makedirs(VERSIONS_DIR, exist_ok=True)
+        os.makedirs(LIBRARIES_DIR, exist_ok=True)
+        os.makedirs(ASSETS_DIR, exist_ok=True)
+        
+        print(f"[DEBUG] GAME_DIR definido para: {GAME_DIR}")
+
+        # --- LÓGICA DO 'launcher_profiles.json' MOVIDA PARA CÁ ---
+        LAUNCHER_PROFILES_PATH = os.path.join(GAME_DIR, "launcher_profiles.json")
+        
+        if not os.path.exists(LAUNCHER_PROFILES_PATH):
+            print(f"AVISO: 'launcher_profiles.json' não encontrado. Criando um novo em {GAME_DIR}")
+            
+            DEFAULT_PROFILES_DATA = {
+              "profiles": {
+                "default-profile": {
+                  "name": "Raposo_launcher" 
+                }
+              },
+              "settings": {
+                "crashAssistance": True
+              },
+              "version": 4
+            }
+            
+            try:
+                with open(LAUNCHER_PROFILES_PATH, "w", encoding="utf-8") as f:
+                    json.dump(DEFAULT_PROFILES_DATA, f, indent=2)
+            except Exception as e:
+                print(f"ERRO: Não foi possível criar 'launcher_profiles.json': {e}")
 
     def save_modpack_config(self, modpack_name, data):
         """Salva os dados de configuração (version, java, ram) para um modpack."""
@@ -2005,51 +2087,81 @@ class RaposoLauncher(ttk.Window):
             print(f"Erro ao carregar config do modpack {modpack_name}: {e}")
             return {}
             
-
-    # ---------------------------
-    # Settings (RAM)
-    # ---------------------------
-    def load_settings(self):
-        """Carrega as configurações GLOBAIS (último modpack e fechar)."""
+    def load_last_modpack_selection(self):
+        """
+        Carrega a seleção do último modpack.
+        Esta função deve ser chamada DEPOIS que a UI e os modpacks
+        foram carregados (load_selections).
+        """
         data = {}
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except Exception as e:
-                print(f"Erro ao carregar settings.json: {e}")
-        
-        # 1. Carregar "Fechar ao Iniciar"
-        close_setting = data.get("close_after_launch", False)
-        self.close_after_launch.set(close_setting)
+            except Exception:
+                pass # Erro já foi reportado por load_settings
 
-        # 1b. Carregar "Mostrar Terminal"
-        terminal_setting = data.get("show_terminal", True) 
-        self.show_terminal.set(terminal_setting)
-
-        # 2. Carregar Último Modpack
         modpack_values = self.selection_combo.cget("values")
         last_modpack = data.get("last_modpack", "")
         
         if last_modpack in modpack_values:
             self.selection_combo.set(last_modpack)
         
-        # <--- ADIÇÃO AQUI ---
-        # Chama manualmente a função para carregar o ícone do último modpack
+        # Chama on_modpack_selected para carregar o ícone
         self.on_modpack_selected()
-        # <--- FIM DA ADIÇÃO ---
+
+    # ---------------------------
+    # Settings (RAM)
+    # ---------------------------
+    def load_settings(self):
+        """
+        Carrega as configurações GLOBAIS do settings.json.
+        Se o arquivo não existir ou uma chave estiver faltando, 
+        ele define os padrões e salva o arquivo.
+        """
+        data = {}
+        file_needs_update = False
+
+        if not os.path.exists(SETTINGS_FILE):
+            print(f"[DEBUG] {SETTINGS_FILE} não encontrado. Criando com padrões.")
+            file_needs_update = True
+        else:
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if not data: # Se o arquivo estiver vazio
+                         file_needs_update = True
+            except Exception as e:
+                print(f"Erro ao carregar settings.json: {e}. Usando padrões.")
+                file_needs_update = True
         
-        if not data:
-            self.save_settings(None)
+        # --- MUDANÇA: Checa se a chave existe ---
+        # Se os dados foram carregados (não vazios) mas a chave falta...
+        if "use_default_minecraft_dir" not in data:
+            print("[DEBUG] Migrando settings: Adicionando 'use_default_minecraft_dir'.")
+            file_needs_update = True
+        # --- FIM DA MUDANÇA ---
+            
+        # 1. Carrega os valores do 'data' (ou seus padrões) para a classe
+        self.close_after_launch.set(data.get("close_after_launch", False))
+        self.show_terminal.set(data.get("show_terminal", True))
+        self.use_default_minecraft_dir = data.get("use_default_minecraft_dir", False)
+        
+        # 2. Se o arquivo era novo ou precisava da chave, salva
+        if file_needs_update:
+            # Pega o last_modpack dos dados (pode ser None)
+            last_modpack_name = data.get("last_modpack")
+            # Salva o arquivo. save_settings() vai ler os valores de self
+            self.save_settings(last_modpack_name)
 
     def save_settings(self, modpack_name):
         """Salva as configurações GLOBAIS."""
-        if not self.close_after_launch: # Se a UI não estiver pronta
-            return
             
         data = {
             "last_modpack": modpack_name,
-            "close_after_launch": self.close_after_launch.get()
+            "close_after_launch": self.close_after_launch.get(),
+            "show_terminal": self.show_terminal.get(),
+            "use_default_minecraft_dir": self.use_default_minecraft_dir
         }
         
         try:
@@ -3031,39 +3143,11 @@ class RaposoLauncher(ttk.Window):
 
 # --- Ponto de Entrada da Aplicação ---
 if __name__ == "__main__":
-    # Garante que os diretórios básicos existem
-    os.makedirs(GAME_DIR, exist_ok=True)
-    os.makedirs(VERSIONS_DIR, exist_ok=True)
-    os.makedirs(LIBRARIES_DIR, exist_ok=True)
-    os.makedirs(ASSETS_DIR, exist_ok=True)
+    # Garante que a pasta de modpacks (que é do launcher) exista
+    os.makedirs(MODPACKS_DIR, exist_ok=True)
     
-    # --- NOVO: Garante que launcher_profiles.json existe ---
-    # O launcher oficial guarda este ficheiro na pasta principal do jogo
-    LAUNCHER_PROFILES_PATH = os.path.join(GAME_DIR, "launcher_profiles.json")
-    
-    if not os.path.exists(LAUNCHER_PROFILES_PATH):
-        print(f"AVISO: 'launcher_profiles.json' não encontrado. Criando um novo em {GAME_DIR}")
-        
-        DEFAULT_PROFILES_DATA = {
-          "profiles": {
-            "default-profile": {
-              "name": "Raposo_launcher" 
-            }
-          },
-          "settings": {
-            "crashAssistance": True
-          },
-          "version": 4
-        }
-        
-        try:
-            # Escreve o ficheiro JSON formatado
-            with open(LAUNCHER_PROFILES_PATH, "w", encoding="utf-8") as f:
-                json.dump(DEFAULT_PROFILES_DATA, f, indent=2)
-        except Exception as e:
-            # Informa se não conseguir criar, mas não impede o launcher de abrir
-            print(f"ERRO: Não foi possível criar 'launcher_profiles.json': {e}")
-    # --- FIM DA ADIÇÃO ---
+    # Toda a lógica de GAME_DIR, VERSIONS_DIR, e launcher_profiles.json
+    # foi movida para o método _update_paths() dentro da classe.
     
     app = RaposoLauncher()
     app.mainloop()
