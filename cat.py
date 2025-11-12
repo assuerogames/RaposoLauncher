@@ -388,7 +388,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.0.0"
+        self.LAUNCHER_VERSION = "v4.0.1"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -413,6 +413,12 @@ class RaposoLauncher(ttk.Window):
         self.discord_state = "No menu principal"
         self.discord_details = "Escolhendo um modpack..."
         
+        # --- MUDANÇA AQUI ---
+        # Definimos como None para não mostrar nada
+        self.discord_small_image = None 
+        self.discord_small_text = "Raposo Launcher"
+        # --- FIM DA MUDANÇA ---
+        
         threading.Thread(target=self._discord_rpc_thread, daemon=True).start()
         
         self.bind("<Destroy>", self._on_close)
@@ -424,7 +430,6 @@ class RaposoLauncher(ttk.Window):
         self.load_settings()
         
         self.process_ui_queue()
-
 
     def build_ui(self):
         """Constrói a nova interface gráfica com a barra de progresso."""
@@ -590,13 +595,22 @@ class RaposoLauncher(ttk.Window):
         # Loop de atualização (a cada 15 segundos)
         while True:
             try:
-                # Atualiza o status
+                # --- GRANDES MUDANÇAS AQUI ---
                 self.RPC.update(
                     state=self.discord_state,
                     details=self.discord_details,
-                    large_image="logo",         # O nome do Asset que você subiu!
+                    large_image="logo",    # O logo principal
                     large_text=f"Raposo Launcher {self.LAUNCHER_VERSION}",
-                    start=start_time      # <--- CORREÇÃO AQUI (Usa a variável)
+                    small_image=self.discord_small_image, # A IMAGEM DINÂMICA
+                    small_text=self.discord_small_text,   # O TEXTO DINÂMICO
+                    start=start_time,
+                    
+                    # --- BOTÕES (COLOQUE SEUS LINKS) ---
+                    buttons=[
+                        {"label": "Baixar o Raposo Launcher", "url": "https://github.com/assuerogames/RaposoLauncher"},
+                        {"label": "Entrar no Discord", "url": "https://discord.gg/SEU-CONVITE"} # Troque pelo seu link
+                    ]
+                    # --- FIM DAS MUDANÇAS ---
                 )
             except Exception as e:
                 # Se o Discord fechar ou der erro, encerra o loop
@@ -2483,17 +2497,20 @@ class RaposoLauncher(ttk.Window):
                 print("[DEBUG] (UI Thread) Escondendo a janela.")
                 self.withdraw()
             
-            # <--- CORREÇÃO AQUI ---
+            # <--- CORREÇÃO AQUI (E MUDANÇA DO DISCORD) ---
             elif msg_type == "show_launcher":
                 print("[DEBUG] Reabrindo o launcher...")
                 self.deiconify() # Mostra a janela
                 self.lift() # Traz para a frente
                 self.focus_force() # Força o foco
 
-                # Reseta o status do Discord
+                # --- MUDANÇA AQUI: Reseta o status do Discord ---
                 print("[Discord RPC] Atualizando status para: No menu")
                 self.discord_state = "No menu principal"
                 self.discord_details = "Escolhendo um modpack..."
+                self.discord_small_image = None # Volta a ser None (invisível)
+                self.discord_small_text = "Raposo Launcher"
+                # --- FIM DA MUDANÇA ---
                 
                 # Limpa a mensagem "iniciado!"
                 self.status_label.config(text="") 
@@ -2539,6 +2556,24 @@ class RaposoLauncher(ttk.Window):
             print("[Discord RPC] Atualizando status para: Jogando")
             self.discord_state = f"Jogando {modpack_name}"
             self.discord_details = f"Versão: {version}"
+
+            # --- MUDANÇA AQUI: Adicionamos o NeoForge ---
+            if "fabric" in version.lower():
+                self.discord_small_image = "fabric_icon" # O nome que você deu no portal
+                self.discord_small_text = "Jogando com Fabric"
+            elif "neoforge" in version.lower():
+                self.discord_small_image = "neoforge_icon" # O nome que você deve subir no portal
+                self.discord_small_text = "Jogando com NeoForge"
+            elif "forge" in version.lower():
+                self.discord_small_image = "forge_icon"
+                self.discord_small_text = "Jogando com Forge"
+            elif "optifine" in version.lower():
+                self.discord_small_image = "optifine_icon"
+                self.discord_small_text = "Jogando com OptiFine"
+            else:
+                self.discord_small_image = "default_icon" # Use o "default_icon" que você subiu
+                self.discord_small_text = "Jogando Minecraft"
+            # --- FIM DA MUDANÇA ---
 
             game_dir = os.path.join(MODPACKS_DIR, modpack)
             os.makedirs(game_dir, exist_ok=True)
@@ -2993,7 +3028,6 @@ class RaposoLauncher(ttk.Window):
         finally:
             self.ui_queue.put({"type": "progress_stop"})
             self.ui_queue.put({"type": "button_toggle", "state": "normal"})
-
 
 # --- Ponto de Entrada da Aplicação ---
 if __name__ == "__main__":
