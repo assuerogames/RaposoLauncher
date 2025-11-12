@@ -40,14 +40,18 @@ VERSIONS_DIR = None
 LIBRARIES_DIR = None
 ASSETS_DIR = None
 
+# (Não se esqueça de ter o 'from io import BytesIO' e 'from PIL import Image, ImageTk, ImageOps'
+# no topo do seu arquivo cat.py)
+
 class ModDownloader(tk.Toplevel):
-    """Uma janela Toplevel para pesquisar e baixar mods do Modrinth."""
+    """Uma janela Toplevel para pesquisar e baixar mods do Modrinth,
+    com uma UI inspirada no site."""
     
     def __init__(self, parent, launcher_instance, modpack_name, modpack_config):
         super().__init__(parent)
         self.title(f"Baixar Mods para: {modpack_name}")
-        self.geometry("800x500") # <--- AUMENTAMOS A JANELA
-        self.resizable(False, False)
+        self.geometry("900x600") # <--- Aumentamos a janela
+        self.resizable(True, True) # <--- Deixamos redimensionável
         self.grab_set()
         
         # Guarda referências importantes
@@ -58,17 +62,9 @@ class ModDownloader(tk.Toplevel):
         self.mods_dir = os.path.join(MODPACKS_DIR, modpack_name, "mods")
         os.makedirs(self.mods_dir, exist_ok=True)
         
-        # Guarda os resultados da busca (AGORA É UM MAPA)
-        self.search_results_map = {}
-        
-        # Guarda a referência da imagem do ícone
-        self.mod_icon_photo = None
-        self.default_mod_icon = None
-        
-        # --- LÓGICA DE DETECÇÃO (Corrigida) ---
+        # --- LÓGICA DE DETECÇÃO (Sem mudanças) ---
         self.game_version = ""
         self.loader = ""
-        
         try:
             version_id = modpack_config.get("version", "")
             if not version_id:
@@ -76,6 +72,8 @@ class ModDownloader(tk.Toplevel):
                 
             if "fabric" in version_id.lower():
                 self.loader = "fabric"
+            elif "neoforge" in version_id.lower(): # <--- Adicionado
+                self.loader = "neoforge"
             elif "forge" in version_id.lower():
                 self.loader = "forge"
             else:
@@ -83,24 +81,38 @@ class ModDownloader(tk.Toplevel):
 
             version_json_path = os.path.join(VERSIONS_DIR, version_id, f"{version_id}.json")
             if not os.path.exists(version_json_path):
-                raise Exception(f"Arquivo {version_id}.json não encontrado!")
-                
-            with open(version_json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            base_version = data.get("inheritsFrom")
-            
-            if base_version:
+                base_version = version_id.split('-')[0]
+                if not base_version:
+                     raise Exception(f"Arquivo {version_id}.json não encontrado!")
                 self.game_version = base_version
             else:
-                self.game_version = version_id
+                with open(version_json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                base_version = data.get("inheritsFrom")
+                if base_version:
+                    self.game_version = base_version
+                else:
+                    self.game_version = version_id
                 
         except Exception as e:
             messagebox.showerror("Erro", f"Não foi possível determinar a versão do modpack: {e}", parent=self)
             self.destroy()
             return
         
+        # --- Referências de UI ---
+        self.default_mod_icon = None
+        self.mod_icons = {} # Guarda referências de ícones para o Tkinter
+        self.selected_project_id = None
+        self.selected_frame = None
         
+        # Carrega o ícone padrão (64x64)
+        try:
+            img = Image.open(os.path.join(BASE_DIR, "default_pack.png")).resize((64, 64), Image.Resampling.LANCZOS)
+            self.default_mod_icon = ImageTk.PhotoImage(img)
+        except Exception:
+            img = Image.new('RGBA', (64, 64), (0,0,0,0))
+            self.default_mod_icon = ImageTk.PhotoImage(img)
+
         # --- Constrói a UI ---
         main_frame = ttk.Frame(self, padding=10)
         main_frame.pack(fill="both", expand=True)
@@ -116,55 +128,33 @@ class ModDownloader(tk.Toplevel):
         self.search_button.pack(side="right")
         self.search_entry.bind("<Return>", self.start_search_thread)
         
-        # --- Frame do Meio (Resultados e Preview) ---
-        middle_frame = ttk.Frame(main_frame)
-        middle_frame.pack(fill="both", expand=True, pady=(10, 0))
-        middle_frame.columnconfigure(0, weight=2) # Lista de mods
-        middle_frame.columnconfigure(1, weight=1) # Painel de preview
-        middle_frame.rowconfigure(0, weight=1)
+        # --- Meio: Lista de Mods Rolável (A GRANDE MUDANÇA) ---
         
-        # --- Meio-Esquerda: Resultados ---
-        tv_frame = ttk.Frame(middle_frame)
-        tv_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        
-        self.tree = ttk.Treeview(tv_frame, columns=("nome", "autor"), show="headings", height=10)
-        self.tree.heading("nome", text="Nome")
-        self.tree.heading("autor", text="Autor")
-        
-        self.tree.column("nome", width=200)
-        self.tree.column("autor", width=100)
-        
-        scrollbar = ttk.Scrollbar(tv_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side="right", fill="y")
-        self.tree.pack(side="left", fill="both", expand=True)
-        
-        # <--- NOVO: BIND DE SELEÇÃO ---
-        # Chama 'on_mod_selected' quando o usuário clica em um item
-        self.tree.bind("<<TreeviewSelect>>", self.on_mod_selected)
-        
-        # --- Meio-Direita: Painel de Preview ---
-        preview_frame = ttk.Frame(middle_frame, padding=10, bootstyle="dark")
-        preview_frame.grid(row=0, column=1, sticky="nsew")
-        preview_frame.grid_propagate(False)
-        preview_frame.rowconfigure(1, weight=1)
-        preview_frame.columnconfigure(0, weight=1)
+        # 1. O Frame principal que segura o canvas e a scrollbar
+        scroll_frame = ttk.Frame(main_frame)
+        scroll_frame.pack(fill="both", expand=True, pady=(10, 0))
+        scroll_frame.rowconfigure(0, weight=1)
+        scroll_frame.columnconfigure(0, weight=1)
 
-        # Ícone Padrão (para o preview)
-        try:
-            img = Image.open(os.path.join(BASE_DIR, "default_pack.png")).resize((128, 128), Image.Resampling.LANCZOS)
-            self.default_mod_icon = ImageTk.PhotoImage(img)
-        except Exception:
-            img = Image.new('RGBA', (128, 128), (0,0,0,0))
-            self.default_mod_icon = ImageTk.PhotoImage(img)
+        # 2. O Canvas, para podermos rolar o conteúdo
+        self.canvas = tk.Canvas(scroll_frame, highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.preview_icon = ttk.Label(preview_frame, image=self.default_mod_icon, bootstyle="dark")
-        self.preview_icon.grid(row=0, column=0, pady=10)
-        
-        self.preview_desc = ttk.Label(preview_frame, text="Selecione um mod para ver a descrição.", wraplength=230, anchor="nw", bootstyle="dark")
-        self.preview_desc.grid(row=1, column=0, sticky="nsew", pady=10)
-        
+        # 3. A Scrollbar
+        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=self.canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 4. O Frame Interno (onde os mods vão)
+        self.list_frame = ttk.Frame(self.canvas)
+        self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
+
+        # Binds para a rolagem funcionar
+        self.list_frame.bind("<Configure>", self._on_frame_configure)
+        self._bind_mousewheel(self) # Bind na janela
+        self._bind_mousewheel(self.canvas) # Bind no canvas
+        self._bind_mousewheel(self.list_frame) # Bind na lista
+
         # --- Fundo: Botões e Status ---
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.pack(fill="x", pady=(10, 0))
@@ -175,8 +165,33 @@ class ModDownloader(tk.Toplevel):
         self.download_button = ttk.Button(bottom_frame, text="Baixar Selecionado", bootstyle="success-outline", command=self.start_download_thread)
         self.download_button.pack(side="right")
         
-        # <--- NOVO: Inicia a busca por mods populares ---
+        # Inicia a busca por mods populares
         self.start_search_thread()
+
+    # --- Funções Auxiliares para a Lista Rolável ---
+
+    def _on_frame_configure(self, event=None):
+        """Atualiza a região de rolagem do canvas."""
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _bind_mousewheel(self, widget):
+        """Aplica o bind de rolagem do mouse (cross-platform)."""
+        widget.bind_all("<MouseWheel>", self._on_mousewheel_windows, add="+")
+        widget.bind_all("<Button-4>", self._on_mousewheel_linux, add="+")
+        widget.bind_all("<Button-5>", self._on_mousewheel_linux, add="+")
+
+    def _on_mousewheel_windows(self, event):
+        """Rolagem no Windows."""
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mousewheel_linux(self, event):
+        """Rolagem no Linux."""
+        if event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
+
+    # --- Funções de UI Atualizadas ---
 
     def set_status(self, text, style=INFO):
         """Atualiza o label de status (thread-safe)."""
@@ -185,82 +200,135 @@ class ModDownloader(tk.Toplevel):
         except tk.TclError:
             pass # Janela foi fechada
 
-    # <--- NOVO: Thread para carregar o ícone ---
-    def _load_icon_thread(self, icon_url):
-        """(THREAD) Baixa o ícone de um mod e o exibe."""
+    def _load_mod_icon(self, icon_label, icon_url):
+        """(THREAD) Baixa o ícone de um mod e o exibe no label fornecido."""
         try:
             headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
             resp = requests.get(icon_url, headers=headers)
             resp.raise_for_status()
             
-            # Usa o BytesIO para abrir a imagem a partir dos dados baixados
             img_data = BytesIO(resp.content)
-            img = Image.open(img_data).resize((128, 128), Image.Resampling.LANCZOS)
+            img = Image.open(img_data).resize((64, 64), Image.Resampling.LANCZOS)
             
-            self.mod_icon_photo = ImageTk.PhotoImage(img)
+            # Guarda a referência para o Tkinter não "perder" a imagem
+            photo = ImageTk.PhotoImage(img)
+            self.mod_icons[icon_url] = photo 
             
             # Agenda a atualização da imagem na thread da UI
-            self.after(0, self.preview_icon.config, {"image": self.mod_icon_photo})
+            self.after(0, icon_label.config, {"image": photo})
             
         except Exception as e:
+            # Se falhar, ele fica com o ícone padrão que já foi setado
             print(f"Erro ao carregar ícone {icon_url}: {e}")
-            # Se falhar, volta para o ícone padrão
-            self.after(0, self.preview_icon.config, {"image": self.default_mod_icon})
 
-    # <--- NOVO: Função chamada ao clicar em um mod ---
-    def on_mod_selected(self, event=None):
-        """Chamado quando um item da lista é selecionado. Atualiza o painel de preview."""
-        sel = self.tree.selection()
-        if not sel: 
-            return
-            
-        project_id = sel[0]
+    def on_mod_selected(self, event, project_id, frame):
+        """Chamado quando um 'card' de mod é clicado."""
         
-        # Pega os dados que salvamos no mapa
-        mod_data = self.search_results_map.get(project_id)
-        if not mod_data:
-            return
-            
-        # 1. Atualiza a descrição
-        self.preview_desc.config(text=mod_data.get("description", "Sem descrição."))
+        # 1. Desmarca o card antigo (se houver)
+        if self.selected_frame:
+            try:
+                self.selected_frame.config(bootstyle="secondary")
+            except tk.TclError:
+                pass # Frame já foi destruído (ex: em uma nova busca)
+
+        # 2. Marca o card novo
+        frame.config(bootstyle="primary") # Estilo de "selecionado"
         
-        # 2. Inicia o thread para carregar o ícone
+        # 3. Salva a referência
+        self.selected_frame = frame
+        self.selected_project_id = project_id
+        
+        # Habilita o botão de download
+        self.download_button.config(state="normal")
+        
+    def _create_mod_widget(self, mod_data):
+        """Cria o 'card' de mod individual e o adiciona na lista."""
+        
+        project_id = mod_data.get("project_id")
+        if not project_id:
+            return
+
+        # --- O 'Card' Principal ---
+        # (Usamos 'secondary' para o fundo cinza-claro do tema 'cyborg')
+        mod_frame = ttk.Frame(self.list_frame, padding=10, bootstyle="secondary")
+        mod_frame.pack(fill="x", pady=(5, 0), padx=(5, 10)) # pady(5,0) para espaçar
+        
+        # Configura o grid do card
+        mod_frame.columnconfigure(1, weight=1) # Coluna do meio (título/desc) estica
+        
+        # --- Coluna 0: Ícone ---
+        icon_label = ttk.Label(mod_frame, image=self.default_mod_icon, bootstyle="secondary")
+        icon_label.grid(row=0, column=0, rowspan=4, sticky="nw", padx=(0, 10))
+        
         icon_url = mod_data.get("icon_url")
         if icon_url:
-            threading.Thread(target=self._load_icon_thread, args=(icon_url,), daemon=True).start()
-        else:
-            # Se o mod não tem ícone, usa o padrão
-            self.preview_icon.config(image=self.default_mod_icon)
+            threading.Thread(target=self._load_mod_icon, args=(icon_label, icon_url), daemon=True).start()
+            
+        # --- Coluna 1: Informações ---
+        title = mod_data.get("title", "Mod Desconhecido")
+        author = mod_data.get("author", "Autor Desconhecido")
+        description = mod_data.get("description", "Sem descrição.")
+
+        title_label = ttk.Label(mod_frame, text=title, font=("Helvetica", 12, "bold"), bootstyle="secondary-inverse")
+        title_label.grid(row=0, column=1, sticky="w")
+        
+        author_label = ttk.Label(mod_frame, text=f"by {author}", bootstyle="secondary-inverse")
+        author_label.grid(row=1, column=1, sticky="w")
+        
+        desc_label = ttk.Label(mod_frame, text=description, wraplength=450, justify="left", bootstyle="secondary-inverse")
+        desc_label.grid(row=2, column=1, sticky="w", pady=(5, 0))
+
+        # --- Coluna 2: Estatísticas ---
+        stats_frame = ttk.Frame(mod_frame, bootstyle="secondary")
+        stats_frame.grid(row=0, column=2, rowspan=4, sticky="ne", padx=(10, 0))
+        
+        downloads = mod_data.get("downloads", 0)
+        followers = mod_data.get("follows", 0)
+        
+        ttk.Label(stats_frame, text=f"📥 {downloads:,} Downloads", bootstyle="secondary-inverse").pack(anchor="e")
+        ttk.Label(stats_frame, text=f"⭐ {followers:,} Seguidores", bootstyle="secondary-inverse").pack(anchor="e")
+        
+        # --- Bind de Clique ---
+        # Precisamos de um 'lambda' para passar os argumentos
+        click_func = lambda e, p=project_id, f=mod_frame: self.on_mod_selected(e, p, f)
+        
+        # Binda o clique em todos os widgets do card
+        mod_frame.bind("<Button-1>", click_func)
+        for widget in mod_frame.winfo_children() + stats_frame.winfo_children():
+            widget.bind("<Button-1>", click_func)
 
     def start_search_thread(self, event=None):
         """Inicia o thread de busca."""
         query = self.search_entry.get().strip()
-        # <--- MUDANÇA AQUI: Não checa mais se a query é vazia
             
         self.set_status("Buscando...", INFO)
         self.search_button.config(state="disabled")
-        self.tree.delete(*self.tree.get_children()) # Limpa a lista
-        self.search_results_map.clear() # Limpa o mapa de dados
+        self.download_button.config(state="disabled") # Desabilita o download
         
-        # Reseta o painel de preview
-        self.preview_icon.config(image=self.default_mod_icon)
-        self.preview_desc.config(text="Selecione um mod para ver a descrição.")
+        # Limpa o estado da seleção
+        self.selected_project_id = None
+        self.selected_frame = None
+        
+        # Limpa a lista de mods (destrói os frames antigos)
+        for child in self.list_frame.winfo_children():
+            child.destroy()
         
         threading.Thread(target=self._search_thread, args=(query,), daemon=True).start()
 
     def _search_thread(self, query):
         """(THREAD) Busca na API do Modrinth."""
         try:
-            facets = f'[["project_type:mod"],["versions:{self.game_version}"],["categories:{self.loader}"]]'
+            # Adiciona 'neoforge' aos loaders
+            loaders_facet = [self.loader]
+            if self.loader == "forge":
+                loaders_facet.append("neoforge")
+                
+            facets = f'[["project_type:mod"],["versions:{self.game_version}"],{json.dumps(["categories:" + l for l in loaders_facet])}]'
             
-            # <--- CORREÇÃO AQUI (Busca Popular) ---
             if query:
-                # Se tem uma busca, usa a query
                 params = {"query": query, "facets": facets}
             else:
-                # Se a busca é vazia, procura pelos mais baixados
                 params = {"sort": "downloads", "facets": facets}
-            # <--- FIM DA CORREÇÃO ---
             
             headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
             
@@ -271,33 +339,18 @@ class ModDownloader(tk.Toplevel):
             hits = data.get("hits", []) # Pega os resultados
             
             # --- Atualiza a UI na thread principal ---
-            def update_ui_list():
+            def _populate_mod_list():
                 if not hits:
                     self.set_status("Nenhum mod encontrado.", WARNING)
                     return
                 
-                for mod in hits:
-                    project_id = mod.get("project_id")
-                    if not project_id:
-                        continue
-                        
-                    # Adiciona na lista da UI
-                    self.tree.insert("", "end", iid=project_id, values=(
-                        mod.get("title", "N/A"),
-                        mod.get("author", "N/A")
-                        # (Removemos o resumo daqui, pois vai para o painel)
-                    ))
-                    
-                    # <--- NOVO: Salva os dados no mapa ---
-                    # Guardamos os dados para usar no painel de preview
-                    self.search_results_map[project_id] = {
-                        "description": mod.get("description", "Sem descrição."),
-                        "icon_url": mod.get("icon_url")
-                    }
+                # Cria um "card" para cada mod
+                for mod_data in hits:
+                    self._create_mod_widget(mod_data)
                 
                 self.set_status(f"Mostrando {len(hits)} mods.", SUCCESS)
 
-            self.after(0, update_ui_list) # Agenda a atualização
+            self.after(0, _populate_mod_list) # Agenda a atualização
             
         except Exception as e:
             self.after(0, self.set_status, f"Erro na busca: {e}", DANGER)
@@ -305,13 +358,12 @@ class ModDownloader(tk.Toplevel):
             self.after(0, self.search_button.config, {"state": "normal"})
 
     def start_download_thread(self):
-        """Inicia o thread de download."""
-        sel = self.tree.selection()
-        if not sel: 
+        """Inicia o thread de download para o mod selecionado."""
+        
+        project_id = self.selected_project_id
+        if not project_id: 
             return messagebox.showerror("Erro", "Selecione um mod na lista para baixar.", parent=self)
             
-        project_id = sel[0]
-        
         self.set_status(f"Buscando versão para {project_id}...", INFO)
         self.download_button.config(state="disabled")
         
@@ -327,11 +379,20 @@ class ModDownloader(tk.Toplevel):
                 "game_versions": json.dumps([self.game_version])
             }
             
-            url = f"https://api.modrinth.com/v2/project/{project_id}/version"
+            url = f"https.api.modrinth.com/v2/project/{project_id}/version"
             resp = requests.get(url, params=params, headers=headers)
             resp.raise_for_status()
             
             versions = resp.json()
+            
+            # Fallback: Se não achar para o loader específico (ex: NeoForge), tenta Forge
+            if not versions and (self.loader == "neoforge" or self.loader == "forge"):
+                print("Fallback: Tentando buscar por 'forge'...")
+                params["loaders"] = json.dumps(["forge"])
+                resp = requests.get(url, params=params, headers=headers)
+                resp.raise_for_status()
+                versions = resp.json()
+
             if not versions:
                 raise Exception(f"Nenhuma versão compatível com {self.game_version} ({self.loader}) foi encontrada.")
             
@@ -347,10 +408,10 @@ class ModDownloader(tk.Toplevel):
                 raise Exception("API retornou uma versão sem arquivo.")
             
             # 4. Baixa o arquivo
-            self.set_status(f"Baixando {file_name}...")
+            self.after(0, self.set_status, f"Baixando {file_name}...")
             
             file_path = os.path.join(self.mods_dir, file_name)
-            self.launcher.download_file(file_url, file_path, file_name)
+            self.launcher.download_file(file_url, file_path, file_name) # Reusa a função de download
             
             self.after(0, self.set_status, f"✅ {file_name} baixado!", SUCCESS)
 
@@ -358,7 +419,6 @@ class ModDownloader(tk.Toplevel):
             self.after(0, self.set_status, f"Erro ao baixar: {e}", DANGER)
         finally:
             self.after(0, self.download_button.config, {"state": "normal"})
-
 
 # --- Funções de Ajuda ---
 def offline_uuid_for(name: str) -> str:
@@ -390,7 +450,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.3.0"
+        self.LAUNCHER_VERSION = "v4.4.0"
         self.logo_clicks = 0
         
         self.bg_photo = None
