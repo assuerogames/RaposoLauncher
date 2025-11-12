@@ -523,7 +523,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.4.1"
+        self.LAUNCHER_VERSION = "v4.4.2"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -1229,34 +1229,155 @@ class RaposoLauncher(ttk.Window):
         return (0, 0, 0)
 
     def _get_pretty_version_name(self, real_name):
-        """Converte um nome de pasta de versão (ex: 1.12.2-forge...) em um nome legível (ex: 1.12.2 (Forge))."""
+        """
+        Converte um nome de pasta de versão (ex: 1.12.2-forge...) 
+        em um nome legível (ex: 1.12.2 (Forge 47.1.3)).
         
+        AGORA LÊ O JSON PARA DESCOBRIR A VERSÃO BASE DO MC.
+        """
         name_low = real_name.lower()
-        loader = ""
         
-        # 1. Detecta o loader
-        if "neoforge" in name_low:
-            loader = "NeoForge"
-        elif "forge" in name_low:
-            loader = "Forge"
-        elif "fabric" in name_low:
-            loader = "Fabric"
-        elif "optifine" in name_low:
-            loader = "OptiFine"
+        # --- NOVO: Tentar ler o JSON para a versão base ---
+        mc_version = ""
+        version_json_path = os.path.join(VERSIONS_DIR, real_name, f"{real_name}.json")
         
-        # 2. Tenta extrair a versão base (ex: 1.12.2)
-        match = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', real_name)
-        
-        if match:
-            base_version = match.group(0) # Pega a string inteira (ex: "1.12.2")
-            if loader:
-                return f"{base_version} ({loader})"
-            else:
-                return f"{base_version} (Vanilla)"
-        else:
-            # Se o regex falhar, apenas retorna o nome original como fallback
-            return real_name
+        if os.path.exists(version_json_path):
+            try:
+                with open(version_json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # A versão base do MC está em 'inheritsFrom'
+                mc_version = data.get("inheritsFrom")
+                if not mc_version:
+                    # Se não herda, é a própria versão (ex: vanilla 1.20.1)
+                    mc_version = data.get("id", real_name)
+                    
+            except Exception as e:
+                print(f"[AVISO] Não foi possível ler {real_name}.json: {e}")
+        # --- FIM DA NOVA LÓGICA ---
 
+        try:
+            # --- NeoForge ---
+            if "neoforge" in name_low:
+                # O nome do MC *deve* ter sido encontrado no JSON
+                if mc_version:
+                    # Extrai a versão do NeoForge do *nome da pasta*
+                    loader_version = real_name.replace('neoforge-', '') # ex: "20.4.251"
+                    return f"{mc_version} (NeoForge {loader_version})"
+                else:
+                    # Fallback se o JSON falhou (lógica antiga)
+                    parts = real_name.split('-') # ex: [1.20.4, neoforge, 20.4.251]
+                    if len(parts) >= 3 and parts[1] == 'neoforge':
+                        return f"{parts[0]} (NeoForge {parts[2]})"
+
+            # --- Forge ---
+            if "forge" in name_low:
+                if mc_version:
+                    # Tenta extrair a versão do Forge do nome da pasta
+                    parts = real_name.split('-') # ex: [1.12.2, forge, 14.23.5.2860]
+                    if len(parts) >= 3 and parts[1] == 'forge':
+                        return f"{mc_version} (Forge {parts[2]})"
+                # Fallback (lógica antiga)
+                parts = real_name.split('-') 
+                if len(parts) >= 3 and parts[1] == 'forge':
+                    return f"{parts[0]} (Forge {parts[2]})"
+            
+            # --- Fabric ---
+            if "fabric-loader" in name_low:
+                if mc_version:
+                    parts = real_name.split('-') # ex: [fabric, loader, 0.15.11, 1.20.1]
+                    if len(parts) >= 4 and parts[0] == 'fabric' and parts[1] == 'loader':
+                        return f"{mc_version} (Fabric {parts[2]})" # mc_version do JSON é mais confiável
+                # Fallback (lógica antiga)
+                parts = real_name.split('-')
+                if len(parts) >= 4 and parts[0] == 'fabric' and parts[1] == 'loader':
+                    return f"{parts[3]} (Fabric {parts[2]})"
+            
+            # --- OptiFine ---
+            if "optifine" in name_low:
+                if mc_version:
+                    parts = real_name.split('-') # ex: [1.12.2, OptiFine_HD_U_G5]
+                    if len(parts) >= 2:
+                        loader_name = parts[1].replace('OptiFine_', '')
+                        return f"{mc_version} (OptiFine {loader_name})"
+                # Fallback (lógica antiga)
+                parts = real_name.split('-')
+                if len(parts) >= 2:
+                    loader_name = parts[1].replace('OptiFine_', '')
+                    return f"{parts[0]} (OptiFine {loader_name})"
+
+            # --- Vanilla, Snapshot, Alpha/Beta ---
+            # Se mc_version foi encontrado, ele é a 'real_name' (ex: 1.20.1, 24w10a)
+            display_name = mc_version if mc_version and mc_version == real_name else real_name
+            
+            category = self._classify_version(real_name)
+            
+            if category == "vanilla":
+                return f"{display_name} (Vanilla)"
+            if category == "snapshots":
+                return f"{display_name} (Snapshot)"
+            
+            # --- CORREÇÃO AQUI ---
+            if category == "alpha_beta":
+                # A 'display_name' já é o nome real (ex: 'a1.2.6')
+                if display_name.startswith('a'):
+                    return f"{display_name} (Alpha)"
+                if display_name.startswith('b'):
+                    return f"{display_name} (Beta)"
+                if 'infdev' in name_low:
+                    return f"{display_name} (Infdev)"
+                if 'c0.' in name_low:
+                    return f"{display_name} (Classic)"
+                return f"{display_name} (Alpha/Beta)" # Fallback
+            # --- FIM DA CORREÇÃO ---
+            
+            # --- Outros / Fallback ---
+            if category == "outros":
+                return f"{real_name} (Outros)"
+                
+        except Exception as e:
+            print(f"[AVISO] Falha ao traduzir nome '{real_name}': {e}")
+            pass 
+            
+        # Fallback final se tudo der errado
+        return real_name
+
+    def _classify_version(self, real_name):
+        """Classifica um nome de versão em uma categoria (ex: 'forge', 'vanilla', 'snapshots')."""
+        name_low = real_name.lower()
+        
+        # 1. Loaders
+        if "neoforge" in name_low: 
+            return "neoforge"
+        if "forge" in name_low: 
+            return "forge"
+        if "fabric" in name_low: 
+            return "fabric"
+        if "optifine" in name_low: 
+            return "optifine"
+        
+        # 2. Tipos Históricos
+        if 'snapshot' in name_low or re.search(r'^\d+w\d+[a-z]?', name_low): 
+            return "snapshots"
+        
+        # --- CORREÇÃO AQUI ---
+        # Checa por 'a' ou 'b' seguido de um número (ex: a1.2.6, b1.8.1)
+        # Ou checa pelos nomes 'infdev' e 'c0.' (classic)
+        if 'infdev' in name_low or 'c0.' in name_low or \
+           re.search(r'^[ab](\d+)', name_low):
+            return "alpha_beta"
+        # --- FIM DA CORREÇÃO ---
+            
+        # 3. Vanilla (Release, Pre-Release, RC)
+        if re.fullmatch(r'(\d+)\.(\d+)(?:\.(\d+))?(?:-(?:pre|rc)\d+)?', real_name):
+            return "vanilla"
+            
+        # 4. Fallback (se ainda tiver um número, provavelmente é vanilla)
+        if re.search(r'(\d+)\.(\d+)', real_name):
+            return "vanilla"
+            
+        # 5. Se não for nada disso
+        return "outros"
 
     def open_version_downloader(self, parent_dialog, version_combo):
         """Abre uma nova janela para baixar manifestos de versão da Mojang."""
@@ -1995,11 +2116,11 @@ class RaposoLauncher(ttk.Window):
         self._modpack_dialog(edit=True, modpacks=modpacks)
 
     def _modpack_dialog(self, edit=False, modpacks=None):
-        """Abre uma janela para criar ou editar um modpack (agora com Java, RAM e Download de Versão)."""
+        """Abre uma janela para criar ou editar um modpack (agora com filtro de versão)."""
         dialog = tk.Toplevel(self)
         dialog.title("Editar Modpack" if edit else "Novo Modpack")
-        # Um pouco mais largo para o novo botão
-        dialog.geometry("400x360")
+        # Mais alto para o novo filtro
+        dialog.geometry("400x400") 
         dialog.resizable(False, False)
         dialog.grab_set()
 
@@ -2007,7 +2128,6 @@ class RaposoLauncher(ttk.Window):
 
         frame = ttk.Frame(dialog, padding=15)
         frame.pack(fill="both", expand=True)
-        # Coluna 1 (widgets) estica
         frame.columnconfigure(1, weight=1) 
 
         current_config = {}
@@ -2017,67 +2137,78 @@ class RaposoLauncher(ttk.Window):
         # --- Nome do Modpack ---
         ttk.Label(frame, text="Nome do Modpack:", font=("Helvetica", 11)).grid(row=0, column=0, sticky="w", pady=6)
         if edit:
-            # Pega o modpack selecionado na tela principal, não apenas o primeiro
             modpack_name = self.selection_combo.get()
             if modpack_name not in modpacks:
                  modpack_name = modpacks[0]
                  
             name_combo = ttk.Combobox(frame, values=modpacks, state="readonly")
             name_combo.set(modpack_name)
-            name_combo.grid(row=0, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0)) # columnspan 2
+            name_combo.grid(row=0, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0))
             current_config = self.load_modpack_config(modpack_name)
         else: 
             name_entry = ttk.Entry(frame)
-            name_entry.grid(row=0, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0)) # columnspan 2
+            name_entry.grid(row=0, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0))
             
-        # --- Versão (INÍCIO DAS MUDANÇAS) ---
-        ttk.Label(frame, text="Versão:", font=("Helvetica", 11)).grid(row=1, column=0, sticky="w", pady=6)
         
-        # 1. Pega os nomes reais (como antes)
+        # --- Listas de Versões (Lógica de Classificação) ---
+        
+        # 1. Pega todos os nomes reais e classifica
         real_versions_list = [v for v in os.listdir(VERSIONS_DIR) if os.path.isdir(os.path.join(VERSIONS_DIR,v))]
         real_versions_sorted = sorted(real_versions_list, key=self._version_key, reverse=True)
+
+        # 2. Cria o "banco de dados" de versões
+        #    all_versions_classified = { "vanilla": [ ("1.20.1 (Vanilla)", "1.20.1"), ("1.19.4", "1.19.4") ],
+        #                                "forge":   [ ("1.12.2 (Forge)", "1.12.2-forge...") ] }
+        all_versions_classified = {
+            "todos": [], "vanilla": [], "neoforge": [], "forge": [], 
+            "fabric": [], "optifine": [], "snapshots": [], "alpha_beta": [], "outros": []
+        }
         
-        # 2. Cria o mapeamento e a lista de nomes bonitos
-        # Usamos 'dialog.version_mapping' para que a func 'confirmar' possa acessá-lo
-        dialog.version_mapping = {} 
-        display_versions = []
-        
+        # Usaremos isso para o 'confirmar'
+        dialog.version_mapping = {}
+
         for real_name in real_versions_sorted:
+            category = self._classify_version(real_name)
             pretty_name = self._get_pretty_version_name(real_name)
             
-            # Lida com nomes bonitos duplicados (ex: duas "1.20.1 (Forge)")
-            if pretty_name in dialog.version_mapping:
-                # Adiciona um sufixo para desambiguar
-                pretty_name_amb = f"{pretty_name} [{real_name[-6:]}]" # ex: "1.20.1 (Forge) [47.1.3]"
-                dialog.version_mapping[pretty_name_amb] = real_name
-                display_versions.append(pretty_name_amb)
-            else:
-                dialog.version_mapping[pretty_name] = real_name
-                display_versions.append(pretty_name)
-
-        # 3. Popula o combobox com os nomes bonitos
-        version_combo = ttk.Combobox(frame, values=display_versions, state="readonly")
-        
-        # 4. Define o valor salvo (lógica de "lookup" reverso)
-        saved_real_version = current_config.get("version")
-        if saved_real_version:
-            # Precisamos encontrar o nome bonito que corresponde ao nome real salvo
-            saved_display_name = next(
-                (display for display, real in dialog.version_mapping.items() if real == saved_real_version), 
-                None
-            )
-            if saved_display_name in display_versions:
-                version_combo.set(saved_display_name)
-        
-        # Se nada foi definido, define o primeiro da lista
-        if not version_combo.get() and display_versions:
-            version_combo.set(display_versions[0])
+            # Lida com nomes bonitos duplicados (ex: dois "1.20.1 (Forge)")
+            display_name = pretty_name
+            count = 2
+            while display_name in dialog.version_mapping:
+                display_name = f"{pretty_name} ({count})"
+                count += 1
             
-        version_combo.grid(row=1, column=1, sticky="ew", pady=6, padx=(10, 6)) # Coluna 1
+            dialog.version_mapping[display_name] = real_name
+            version_tuple = (display_name, real_name)
+            
+            all_versions_classified[category].append(version_tuple)
+            all_versions_classified["todos"].append(version_tuple)
+
         
-        # --- FIM DAS MUDANÇAS NA SEÇÃO "VERSÃO" ---
+        # --- NOVO: Filtro de Versão ---
+        ttk.Label(frame, text="Filtro:", font=("Helvetica", 11)).grid(row=1, column=0, sticky="w", pady=(6,0))
         
-        # --- Botão de Download ---
+        filter_categories_map = {
+            "Todos": "todos",
+            "Vanilla": "vanilla",
+            "NeoForge": "neoforge",
+            "Forge": "forge",
+            "Fabric": "fabric",
+            "OptiFine": "optifine",
+            "Snapshots": "snapshots",
+            "Alpha/Beta": "alpha_beta",
+            "Outros": "outros"
+        }
+        
+        filter_combo = ttk.Combobox(frame, values=list(filter_categories_map.keys()), state="readonly")
+        filter_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(6,0), padx=(10, 0))
+        
+        
+        # --- Versão (Agora controlada pelo filtro) ---
+        ttk.Label(frame, text="Versão:", font=("Helvetica", 11)).grid(row=2, column=0, sticky="w", pady=6)
+        version_combo = ttk.Combobox(frame, state="readonly")
+        version_combo.grid(row=2, column=1, sticky="ew", pady=6, padx=(10, 6))
+        
         download_btn = ttk.Button(
             frame, 
             text="Baixar", 
@@ -2085,10 +2216,64 @@ class RaposoLauncher(ttk.Window):
             width=8,
             command=lambda: self.open_version_downloader(dialog, version_combo) 
         )
-        download_btn.grid(row=1, column=2, sticky="w", pady=6, padx=(0, 0)) # Coluna 2
+        download_btn.grid(row=2, column=2, sticky="w", pady=6, padx=(0, 0))
 
+
+        # --- Função de Atualização da Lista ---
+        def update_version_list(event=None):
+            # Pega o nome bonito do filtro (ex: "Vanilla")
+            selected_filter_name = filter_combo.get()
+            # Converte para a chave interna (ex: "vanilla")
+            selected_category_key = filter_categories_map.get(selected_filter_name, "todos")
+            
+            # Pega a lista de tuplas (pretty_name, real_name)
+            versions_to_show_tuples = all_versions_classified[selected_category_key]
+            
+            # Pega apenas os nomes bonitos para mostrar no combobox
+            display_names = [pretty for (pretty, real) in versions_to_show_tuples]
+            
+            version_combo["values"] = display_names
+            
+            if display_names:
+                version_combo.set(display_names[0])
+            else:
+                version_combo.set("")
+        
+        # Binda a função ao filtro
+        filter_combo.bind("<<ComboboxSelected>>", update_version_list)
+        
+
+        # --- Define os valores iniciais (DEPOIS que a função de update foi criada) ---
+        saved_real_version = current_config.get("version")
+        if saved_real_version:
+            # Encontra a categoria da versão salva
+            saved_category = self._classify_version(saved_real_version)
+            
+            # Acha o nome bonito do filtro (ex: "Vanilla")
+            saved_filter_name = next(
+                (name for name, key in filter_categories_map.items() if key == saved_category), 
+                "Todos"
+            )
+            filter_combo.set(saved_filter_name)
+            
+            # Atualiza a lista de versões
+            update_version_list()
+            
+            # Acha o nome bonito da versão salva
+            saved_display_name = next(
+                (display for display, real in dialog.version_mapping.items() if real == saved_real_version), 
+                None
+            )
+            if saved_display_name in version_combo["values"]:
+                version_combo.set(saved_display_name)
+        else:
+            # Padrão: "Todos"
+            filter_combo.set("Todos")
+            update_version_list()
+
+        
         # --- Java ---
-        ttk.Label(frame, text="Java:", font=("Helvetica", 11)).grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Label(frame, text="Java:", font=("Helvetica", 11)).grid(row=3, column=0, sticky="w", pady=6)
         java_values = list(self.java_options.keys())
         java_combo_dialog = ttk.Combobox(frame, values=java_values, state="readonly")
         
@@ -2098,10 +2283,10 @@ class RaposoLauncher(ttk.Window):
         elif java_values:
             java_combo_dialog.set(java_values[0]) 
             
-        java_combo_dialog.grid(row=2, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0)) # columnspan 2
+        java_combo_dialog.grid(row=3, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0))
 
         # --- RAM ---
-        ttk.Label(frame, text="Alocar RAM:", font=("Helvetica", 11)).grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Label(frame, text="Alocar RAM:", font=("Helvetica", 11)).grid(row=4, column=0, sticky="w", pady=6)
         ram_values = ["2G", "3G", "4G", "6G", "8G", "10G", "12G", "16G"]
         ram_combo_dialog = ttk.Combobox(frame, values=ram_values, state="readonly")
         
@@ -2111,7 +2296,7 @@ class RaposoLauncher(ttk.Window):
         else:
             ram_combo_dialog.set(default_ram)
             
-        ram_combo_dialog.grid(row=3, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0)) # columnspan 2
+        ram_combo_dialog.grid(row=4, column=1, columnspan=2, sticky="ew", pady=6, padx=(10, 0))
 
         # --- Botão Confirmar ---
         def confirmar():
@@ -2120,11 +2305,9 @@ class RaposoLauncher(ttk.Window):
             else:
                 modpack_name = name_entry.get().strip()
             
-            # --- MUDANÇA AQUI ---
             display_str = version_combo.get().strip()
-            # Pega o nome real (ex: "1.8.9-forge...") usando o nome bonito (ex: "1.8.9 (Forge)")
-            version_str = dialog.version_mapping.get(display_str)
-            # --- FIM DA MUDANÇA ---
+            # Pega o nome real (ex: "1.8.9-forge...") usando o nome bonito
+            version_str = dialog.version_mapping.get(display_str) 
             
             java_str = java_combo_dialog.get().strip()
             ram_str = ram_combo_dialog.get().strip()
@@ -2132,15 +2315,12 @@ class RaposoLauncher(ttk.Window):
             if not modpack_name or not version_str or not java_str or not ram_str:
                 return messagebox.showerror("Erro","Preencha todos os campos!", parent=dialog)
             
-            if version_str == "NENHUMA":
-                 return messagebox.showerror("Erro","Por favor, baixe e selecione uma versão válida.", parent=dialog)
-            
             if not edit and os.path.exists(os.path.join(MODPACKS_DIR, modpack_name)):
                 return messagebox.showerror("Erro","Já existe um modpack com esse nome!", parent=dialog)
             
             config_data = {
                 "name": modpack_name,
-                "version": version_str, # <- Salva o nome real e complexo!
+                "version": version_str, # Salva o nome real e complexo
                 "java": java_str,
                 "ram": ram_str
             }
@@ -2152,8 +2332,7 @@ class RaposoLauncher(ttk.Window):
             self.on_modpack_selected()
             dialog.destroy()
 
-        # --- ESTE É O ÚNICO BOTÃO "CONFIRMAR" ---
-        ttk.Button(frame, text="Confirmar", bootstyle="success", command=confirmar).grid(row=4, column=0, columnspan=3, pady=20) # columnspan 3%
+        ttk.Button(frame, text="Confirmar", bootstyle="success", command=confirmar).grid(row=5, column=0, columnspan=3, pady=20)
 
     def on_modpack_selected(self, event=None):
         """Salva o modpack e ATUALIZA O ÍCONE."""
