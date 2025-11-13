@@ -49,18 +49,29 @@ class ModDownloader(tk.Toplevel):
     
     def __init__(self, parent, launcher_instance, modpack_name, modpack_config):
         super().__init__(parent)
-        self.title(f"Baixar Mods para: {modpack_name}")
+        self.title(f"Biblioteca Modrinth ({modpack_name})")
         self.geometry("900x600") 
         self.resizable(True, True) 
         self.grab_set()
         
-        # Guarda referências importantes
         self.launcher = launcher_instance
         self.modpack_name = modpack_name
         
-        # Onde salvar os mods
+        # --- NOVO: Adiciona o ícone da janela ---
+        try:
+            self.launcher._set_dialog_icon(self)
+        except Exception as e:
+            print(f"Aviso: Não foi possível aplicar ícone à janela de mods: {e}")
+        # --- FIM DA NOVIDADE ---
+        
+        # --- Múltiplos diretórios (Sem mudanças) ---
         self.mods_dir = os.path.join(MODPACKS_DIR, modpack_name, "mods")
+        self.resourcepacks_dir = os.path.join(MODPACKS_DIR, modpack_name, "resourcepacks")
+        self.shaderpacks_dir = os.path.join(MODPACKS_DIR, modpack_name, "shaderpacks")
+        
         os.makedirs(self.mods_dir, exist_ok=True)
+        os.makedirs(self.resourcepacks_dir, exist_ok=True)
+        os.makedirs(self.shaderpacks_dir, exist_ok=True)
         
         # --- LÓGICA DE DETECÇÃO (Sem mudanças) ---
         self.game_version = ""
@@ -72,12 +83,12 @@ class ModDownloader(tk.Toplevel):
                 
             if "fabric" in version_id.lower():
                 self.loader = "fabric"
-            elif "neoforge" in version_id.lower(): # <--- Adicionado
+            elif "neoforge" in version_id.lower():
                 self.loader = "neoforge"
             elif "forge" in version_id.lower():
                 self.loader = "forge"
             else:
-                self.loader = "forge" # Padrão
+                self.loader = "forge" 
 
             version_json_path = os.path.join(VERSIONS_DIR, version_id, f"{version_id}.json")
             if not os.path.exists(version_json_path):
@@ -99,96 +110,123 @@ class ModDownloader(tk.Toplevel):
             self.destroy()
             return
         
-        # --- Referências de UI ---
+        # --- Referências de UI (Sem mudanças) ---
         self.default_mod_icon = None
-        self.mod_icons = {} # Guarda referências de ícones para o Tkinter
+        self.mod_icons = {} 
         self.selected_project_id = None
         self.selected_frame = None
         
-        # --- NOVO: Variáveis de Paginação ---
         self.current_offset = 0
-        self.hits_per_page = 20 # O Modrinth usa 20 como padrão
+        self.hits_per_page = 20 
         
-        # Carrega o ícone padrão (64x64)
+        self.current_project_type = "mod"
+        
+        # --- MUDANÇA: Fallback do Ícone Padrão ---
         try:
             img = Image.open(os.path.join(BASE_DIR, "default_pack.png")).resize((64, 64), Image.Resampling.LANCZOS)
             self.default_mod_icon = ImageTk.PhotoImage(img)
-        except Exception:
-            img = Image.new('RGBA', (64, 64), (0,0,0,0))
+        except Exception as e:
+            print(f"[AVISO] 'default_pack.png' não encontrado para o ModDownloader. Usando fallback. Erro: {e}")
+            # Cria um quadrado cinza escuro (visível no tema) em vez de transparente
+            img = Image.new('RGBA', (64, 64), (60, 60, 60)) 
             self.default_mod_icon = ImageTk.PhotoImage(img)
+        # --- FIM DA MUDANÇA ---
 
-        # --- Constrói a UI ---
+        # --- Constrói a UI (Plano B - Combobox) ---
         main_frame = ttk.Frame(self, padding=10)
         main_frame.pack(fill="both", expand=True)
         
-        # --- Topo: Busca ---
-        search_frame = ttk.Frame(main_frame)
-        search_frame.pack(fill="x", pady=5)
+        top_frame = ttk.Frame(main_frame)
+        top_frame.pack(fill="x", pady=(0, 5))
+        top_frame.columnconfigure(1, weight=1) 
+
+        ttk.Label(top_frame, text="Categoria:").grid(row=0, column=0, sticky="w", padx=(0, 10))
         
-        self.search_entry = ttk.Entry(search_frame)
-        self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.category_combo = ttk.Combobox(
+            top_frame,
+            state="readonly",
+            values=["Mods", "Resource Packs", "Shaders"],
+            width=20 
+        )
+        self.category_combo.grid(row=1, column=0, sticky="w", padx=(0, 10))
+        self.category_combo.set("Mods")
         
-        # --- MUDANÇA: Atualiza o command ---
-        self.search_button = ttk.Button(search_frame, text="Buscar", command=lambda: self.start_search_thread(offset_change=0))
-        self.search_button.pack(side="right")
+        self.category_combo.bind("<<ComboboxSelected>>", self.on_category_changed)
+        
+        ttk.Label(top_frame, text="Buscar:").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        
+        self.search_entry = ttk.Entry(top_frame)
+        self.search_entry.grid(row=1, column=1, sticky="ew", padx=(10, 10))
+        
+        self.search_button = ttk.Button(top_frame, text="Buscar", command=lambda: self.start_search_thread(offset_change=0))
+        self.search_button.grid(row=1, column=2, sticky="e")
+        
         self.search_entry.bind("<Return>", lambda e: self.start_search_thread(offset_change=0))
         
         # --- Meio: Lista de Mods Rolável (Sem mudanças) ---
-        
-        # 1. O Frame principal que segura o canvas e a scrollbar
         scroll_frame = ttk.Frame(main_frame)
         scroll_frame.pack(fill="both", expand=True, pady=(10, 0))
         scroll_frame.rowconfigure(0, weight=1)
         scroll_frame.columnconfigure(0, weight=1)
 
-        # 2. O Canvas, para podermos rolar o conteúdo
         self.canvas = tk.Canvas(scroll_frame, highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
 
-        # 3. A Scrollbar
         scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=self.canvas.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
-        # 4. O Frame Interno (onde os mods vão)
         self.list_frame = ttk.Frame(self.canvas)
         self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
 
-        # Binds para a rolagem funcionar
         self.list_frame.bind("<Configure>", self._on_frame_configure)
-        self._bind_mousewheel(self) # Bind na janela
-        self._bind_mousewheel(self.canvas) # Bind no canvas
-        self._bind_mousewheel(self.list_frame) # Bind na lista
+        self._bind_mousewheel(self) 
+        self._bind_mousewheel(self.canvas) 
+        self._bind_mousewheel(self.list_frame) 
 
-        # --- Fundo: Botões e Status ---
+        # --- Fundo: Botões e Status (Sem mudanças) ---
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.pack(fill="x", pady=(10, 0))
         
-        self.status_label = ttk.Label(bottom_frame, text=f"Buscando mods populares para {self.game_version} ({self.loader})...")
-        self.status_label.pack(side="left", fill="x", expand=True) # expand=True para empurrar os botões
+        self.status_label = ttk.Label(bottom_frame, text=f"Buscando no Modrinth para {self.game_version}...")
+        self.status_label.pack(side="left", fill="x", expand=True) 
         
-        # --- NOVO: Botões de Paginação ---
         self.prev_page_button = ttk.Button(
-            bottom_frame, 
-            text="< Anterior", 
-            state="disabled", 
+            bottom_frame, text="< Anterior", state="disabled", 
             command=lambda: self.start_search_thread(offset_change=-self.hits_per_page)
         )
         self.prev_page_button.pack(side="left", padx=5)
         
         self.next_page_button = ttk.Button(
-            bottom_frame, 
-            text="Próxima >", 
-            state="disabled", 
+            bottom_frame, text="Próxima >", state="disabled", 
             command=lambda: self.start_search_thread(offset_change=self.hits_per_page)
         )
         self.next_page_button.pack(side="left", padx=5)
-        # --- FIM DAS NOVIDADES ---
         
         self.download_button = ttk.Button(bottom_frame, text="Baixar Selecionado", bootstyle="success-outline", command=self.start_download_thread)
         self.download_button.pack(side="right")
         
-        # Inicia a busca por mods populares (offset_change=0 para começar do zero)
+        self.start_search_thread(offset_change=0)
+
+    def on_category_changed(self, event=None):
+        """Chamado quando uma categoria é selecionada no Combobox."""
+        
+        # 1. Pega o texto do combobox (ex: "Resource Packs")
+        selected_category = self.category_combo.get()
+        
+        # 2. Traduz para o nome da API
+        if selected_category == "Mods":
+            self.current_project_type = "mod"
+        elif selected_category == "Resource Packs":
+            self.current_project_type = "resourcepack"
+        elif selected_category == "Shaders":
+            self.current_project_type = "shader" # Corrigido para "shader" (API do Modrinth)
+        else:
+            self.current_project_type = "mod" # Padrão
+            
+        print(f"[DEBUG] Categoria alterada para: {self.current_project_type}")
+        
+        # 3. Inicia uma nova busca (resetando para a página 1)
         self.start_search_thread(offset_change=0)
 
     # --- Funções Auxiliares para a Lista Rolável ---
@@ -359,31 +397,33 @@ class ModDownloader(tk.Toplevel):
         threading.Thread(target=self._search_thread, args=(query, self.current_offset), daemon=True).start()
 
     def _search_thread(self, query, offset):
-        """(THREAD) Busca na API do Modrinth, com suporte a offset."""
+        """(THREAD) Busca na API do Modrinth, com suporte a offset E categoria."""
         try:
-            # Adiciona 'neoforge' aos loaders
-            loaders_facet = [self.loader]
-            if self.loader == "forge":
-                loaders_facet.append("neoforge")
-                
-            facets = f'[["project_type:mod"],["versions:{self.game_version}"],{json.dumps(["categories:" + l for l in loaders_facet])}]'
+            # --- Lógica de Facets (CORRIGIDA) ---
             
-            # --- PARÂMETROS ATUALIZADOS ---
+            facets_list = [
+                [f"project_type:{self.current_project_type}"]
+            ]
+            
+            # --- CORREÇÃO AQUI ---
+            # 1. Adiciona a versão do jogo APENAS se NÃO for shader
+            if self.current_project_type != "shader": # Usando a sua correção
+            # --- FIM DA CORREÇÃO ---
+                facets_list.append([f"versions:{self.game_version}"])
+
+            # 2. Adiciona o loader APENAS se for um mod
+            if self.current_project_type == "mod":
+                loaders = [self.loader]
+                if self.loader == "forge":
+                    loaders.append("neoforge")
+                facets_list.append(["categories:" + l for l in loaders])
+            
+            facets = json.dumps(facets_list)
+            
             if query:
-                params = {
-                    "query": query, 
-                    "facets": facets, 
-                    "offset": offset, 
-                    "limit": self.hits_per_page
-                }
+                params = {"query": query, "facets": facets, "offset": offset, "limit": self.hits_per_page}
             else:
-                params = {
-                    "sort": "downloads", 
-                    "facets": facets, 
-                    "offset": offset, 
-                    "limit": self.hits_per_page
-                }
-            # --- FIM DA ATUALIZAÇÃO ---
+                params = {"sort": "downloads", "facets": facets, "offset": offset, "limit": self.hits_per_page}
             
             headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
             
@@ -391,39 +431,31 @@ class ModDownloader(tk.Toplevel):
             resp.raise_for_status()
             
             data = resp.json()
-            hits = data.get("hits", []) # Pega os resultados
+            hits = data.get("hits", []) 
             
-            # --- Atualiza a UI na thread principal ---
             def _populate_mod_list():
                 if not hits:
-                    self.set_status("Nenhum mod encontrado nesta página.", WARNING)
-                    # Habilita "Anterior" se não estivermos na primeira página
+                    self.set_status("Nenhum item encontrado nesta página.", WARNING)
                     if self.current_offset > 0:
                         self.prev_page_button.config(state="normal")
                     return
                 
-                # Cria um "card" para cada mod
                 for mod_data in hits:
                     self._create_mod_widget(mod_data)
                 
-                self.set_status(f"Mostrando {len(hits)} mods (Página {self.current_offset // self.hits_per_page + 1}).", SUCCESS)
+                self.set_status(f"Mostrando {len(hits)} itens (Página {self.current_offset // self.hits_per_page + 1}).", SUCCESS)
 
-                # --- LÓGICA DE HABILITAR BOTÕES ---
-                
-                # Habilita "Próxima" APENAS se a API retornou uma página cheia
                 if len(hits) == self.hits_per_page:
                     self.next_page_button.config(state="normal")
                 
-                # Habilita "Anterior" se não estivermos na primeira página
                 if self.current_offset > 0:
                     self.prev_page_button.config(state="normal")
 
-            self.after(0, _populate_mod_list) # Agenda a atualização
+            self.after(0, _populate_mod_list) 
             
         except Exception as e:
             self.after(0, self.set_status, f"Erro na busca: {e}", DANGER)
         finally:
-            # Reabilita o botão de buscar em qualquer caso
             self.after(0, self.search_button.config, {"state": "normal"})
 
     def start_download_thread(self):
@@ -439,27 +471,32 @@ class ModDownloader(tk.Toplevel):
         threading.Thread(target=self._download_thread, args=(project_id,), daemon=True).start()
         
     def _download_thread(self, project_id):
-        """(THREAD) Busca a versão correta do mod e baixa."""
+        """(THREAD) Busca a versão correta e baixa para a pasta certa."""
         try:
             # 1. Busca as versões do projeto
             headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
-            params = {
-                "loaders": json.dumps([self.loader]),
-                "game_versions": json.dumps([self.game_version])
-            }
+            
+            params = {}
             
             # --- CORREÇÃO AQUI ---
-            # Trocado "httpss.api..." por "https://api..."
-            url = f"https://api.modrinth.com/v2/project/{project_id}/version"
+            # Adiciona a versão do jogo APENAS se NÃO for shader
+            if self.current_project_type != "shader": # Usando a sua correção
             # --- FIM DA CORREÇÃO ---
+                params["game_versions"] = json.dumps([self.game_version])
+            
+            # Adiciona o loader SÓ SE for um mod
+            if self.current_project_type == "mod":
+                 params["loaders"] = json.dumps([self.loader])
+                 
+            url = f"https://api.modrinth.com/v2/project/{project_id}/version"
             
             resp = requests.get(url, params=params, headers=headers)
             resp.raise_for_status()
             
             versions = resp.json()
             
-            # Fallback: Se não achar para o loader específico (ex: NeoForge), tenta Forge
-            if not versions and (self.loader == "neoforge" or self.loader == "forge"):
+            # Fallback (Apenas para mods)
+            if not versions and self.current_project_type == "mod" and (self.loader == "neoforge" or self.loader == "forge"):
                 print("Fallback: Tentando buscar por 'forge'...")
                 params["loaders"] = json.dumps(["forge"])
                 resp = requests.get(url, params=params, headers=headers)
@@ -467,12 +504,12 @@ class ModDownloader(tk.Toplevel):
                 versions = resp.json()
 
             if not versions:
-                raise Exception(f"Nenhuma versão compatível com {self.game_version} ({self.loader}) foi encontrada.")
+                raise Exception(f"Nenhuma versão compatível foi encontrada.")
             
-            # 2. Pega a versão mais recente (a primeira da lista)
+            # 2. Pega a versão mais recente
             latest_version = versions[0]
             
-            # 3. Pega o arquivo principal dessa versão
+            # 3. Pega o arquivo principal
             file_to_download = latest_version.get("files", [{}])[0]
             file_url = file_to_download.get("url")
             file_name = file_to_download.get("filename")
@@ -480,11 +517,23 @@ class ModDownloader(tk.Toplevel):
             if not file_url or not file_name:
                 raise Exception("API retornou uma versão sem arquivo.")
             
+            # --- CORREÇÃO AQUI ---
+            target_dir = self.mods_dir 
+            if self.current_project_type == "resourcepack":
+                target_dir = self.resourcepacks_dir
+                print(f"[DEBUG] Salvando Resource Pack em: {target_dir}")
+            elif self.current_project_type == "shader": # Usando a sua correção
+                target_dir = self.shaderpacks_dir
+                print(f"[DEBUG] Salvando Shader em: {target_dir}")
+            # --- FIM DA CORREÇÃO ---
+            else:
+                print(f"[DEBUG] Salvando Mod em: {target_dir}")
+
             # 4. Baixa o arquivo
             self.after(0, self.set_status, f"Baixando {file_name}...")
             
-            file_path = os.path.join(self.mods_dir, file_name)
-            self.launcher.download_file(file_url, file_path, file_name) # Reusa a função de download
+            file_path = os.path.join(target_dir, file_name)
+            self.launcher.download_file(file_url, file_path, file_name) 
             
             self.after(0, self.set_status, f"✅ {file_name} baixado!", SUCCESS)
 
@@ -523,7 +572,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.4.2"
+        self.LAUNCHER_VERSION = "v4.4.5"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -678,7 +727,15 @@ class RaposoLauncher(ttk.Window):
         ttk.Button(button_frame, text="📂 Abrir Pasta", bootstyle="secondary-outline", command=self.abrir_pasta_modpack).grid(row=1, column=0, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="📥 Importar", bootstyle="primary-outline", command=self.importar_modpack).grid(row=1, column=1, sticky="ew", padx=2, pady=2)
         ttk.Button(button_frame, text="📤 Exportar", bootstyle="primary-outline", command=self.exportar_modpack).grid(row=1, column=2, sticky="ew", padx=2, pady=2)
-        ttk.Button(button_frame, text="📥 Baixar Mods (Modrinth)", bootstyle="success-outline", command=self.open_mod_downloader).grid(row=2, column=0, columnspan=3, sticky="ew", padx=2, pady=2)
+        
+        # --- MUDANÇA AQUI ---
+        ttk.Button(
+            button_frame, 
+            text="📚 Biblioteca Modrinth", # <- Texto alterado
+            bootstyle="success-outline", 
+            command=self.open_mod_downloader
+        ).grid(row=2, column=0, columnspan=3, sticky="ew", padx=2, pady=2)
+        # --- FIM DA MUDANÇA ---
         
         # --- FIM DO CONTROLS_FRAME ---
 
