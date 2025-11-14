@@ -18,6 +18,8 @@ import shutil
 import re
 import pypresence
 import time
+from markdown_it import MarkdownIt
+from tkhtmlview import HTMLLabel
 
 
 try:
@@ -57,14 +59,11 @@ class ModDownloader(tk.Toplevel):
         self.launcher = launcher_instance
         self.modpack_name = modpack_name
         
-        # --- NOVO: Adiciona o ícone da janela ---
         try:
             self.launcher._set_dialog_icon(self)
         except Exception as e:
             print(f"Aviso: Não foi possível aplicar ícone à janela de mods: {e}")
-        # --- FIM DA NOVIDADE ---
         
-        # --- Múltiplos diretórios (Sem mudanças) ---
         self.mods_dir = os.path.join(MODPACKS_DIR, modpack_name, "mods")
         self.resourcepacks_dir = os.path.join(MODPACKS_DIR, modpack_name, "resourcepacks")
         self.shaderpacks_dir = os.path.join(MODPACKS_DIR, modpack_name, "shaderpacks")
@@ -110,7 +109,7 @@ class ModDownloader(tk.Toplevel):
             self.destroy()
             return
         
-        # --- Referências de UI (Sem mudanças) ---
+        # --- Referências de UI ---
         self.default_mod_icon = None
         self.mod_icons = {} 
         self.selected_project_id = None
@@ -118,32 +117,37 @@ class ModDownloader(tk.Toplevel):
         
         self.current_offset = 0
         self.hits_per_page = 20 
-        
         self.current_project_type = "mod"
         
-        # --- MUDANÇA: Fallback do Ícone Padrão ---
+        # --- NOVO: Referências de Frames para "View Swapping" ---
+        self.main_frame = None
+        self.top_frame = None       # Onde fica a busca
+        self.list_scroll_frame = None # Onde fica a lista
+        self.bottom_frame = None    # Onde fica a paginação
+        self.details_frame = None   # Onde ficarão os detalhes (começa nulo)
+        
+        # Carrega o ícone padrão
         try:
             img = Image.open(os.path.join(BASE_DIR, "default_pack.png")).resize((64, 64), Image.Resampling.LANCZOS)
             self.default_mod_icon = ImageTk.PhotoImage(img)
         except Exception as e:
             print(f"[AVISO] 'default_pack.png' não encontrado para o ModDownloader. Usando fallback. Erro: {e}")
-            # Cria um quadrado cinza escuro (visível no tema) em vez de transparente
             img = Image.new('RGBA', (64, 64), (60, 60, 60)) 
             self.default_mod_icon = ImageTk.PhotoImage(img)
-        # --- FIM DA MUDANÇA ---
 
-        # --- Constrói a UI (Plano B - Combobox) ---
-        main_frame = ttk.Frame(self, padding=10)
-        main_frame.pack(fill="both", expand=True)
+        # --- Constrói a UI ---
+        self.main_frame = ttk.Frame(self, padding=10)
+        self.main_frame.pack(fill="both", expand=True)
         
-        top_frame = ttk.Frame(main_frame)
-        top_frame.pack(fill="x", pady=(0, 5))
-        top_frame.columnconfigure(1, weight=1) 
+        # --- Topo (Busca e Categoria) ---
+        self.top_frame = ttk.Frame(self.main_frame)
+        self.top_frame.pack(fill="x", pady=(0, 5))
+        self.top_frame.columnconfigure(1, weight=1) 
 
-        ttk.Label(top_frame, text="Categoria:").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Label(self.top_frame, text="Categoria:").grid(row=0, column=0, sticky="w", padx=(0, 10))
         
         self.category_combo = ttk.Combobox(
-            top_frame,
+            self.top_frame,
             state="readonly",
             values=["Mods", "Resource Packs", "Shaders"],
             width=20 
@@ -153,26 +157,26 @@ class ModDownloader(tk.Toplevel):
         
         self.category_combo.bind("<<ComboboxSelected>>", self.on_category_changed)
         
-        ttk.Label(top_frame, text="Buscar:").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(self.top_frame, text="Buscar:").grid(row=0, column=1, sticky="w", padx=(10, 0))
         
-        self.search_entry = ttk.Entry(top_frame)
+        self.search_entry = ttk.Entry(self.top_frame)
         self.search_entry.grid(row=1, column=1, sticky="ew", padx=(10, 10))
         
-        self.search_button = ttk.Button(top_frame, text="Buscar", command=lambda: self.start_search_thread(offset_change=0))
+        self.search_button = ttk.Button(self.top_frame, text="Buscar", command=lambda: self.start_search_thread(offset_change=0))
         self.search_button.grid(row=1, column=2, sticky="e")
         
         self.search_entry.bind("<Return>", lambda e: self.start_search_thread(offset_change=0))
         
-        # --- Meio: Lista de Mods Rolável (Sem mudanças) ---
-        scroll_frame = ttk.Frame(main_frame)
-        scroll_frame.pack(fill="both", expand=True, pady=(10, 0))
-        scroll_frame.rowconfigure(0, weight=1)
-        scroll_frame.columnconfigure(0, weight=1)
+        # --- Meio: Lista de Mods Rolável ---
+        self.list_scroll_frame = ttk.Frame(self.main_frame)
+        self.list_scroll_frame.pack(fill="both", expand=True, pady=(10, 0))
+        self.list_scroll_frame.rowconfigure(0, weight=1)
+        self.list_scroll_frame.columnconfigure(0, weight=1)
 
-        self.canvas = tk.Canvas(scroll_frame, highlightthickness=0)
+        self.canvas = tk.Canvas(self.list_scroll_frame, highlightthickness=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
 
-        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=self.canvas.yview)
+        scrollbar = ttk.Scrollbar(self.list_scroll_frame, orient="vertical", command=self.canvas.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -184,26 +188,26 @@ class ModDownloader(tk.Toplevel):
         self._bind_mousewheel(self.canvas) 
         self._bind_mousewheel(self.list_frame) 
 
-        # --- Fundo: Botões e Status (Sem mudanças) ---
-        bottom_frame = ttk.Frame(main_frame)
-        bottom_frame.pack(fill="x", pady=(10, 0))
+        # --- Fundo: Botões e Status ---
+        self.bottom_frame = ttk.Frame(self.main_frame)
+        self.bottom_frame.pack(fill="x", pady=(10, 0))
         
-        self.status_label = ttk.Label(bottom_frame, text=f"Buscando no Modrinth para {self.game_version}...")
+        self.status_label = ttk.Label(self.bottom_frame, text=f"Buscando no Modrinth para {self.game_version}...")
         self.status_label.pack(side="left", fill="x", expand=True) 
         
         self.prev_page_button = ttk.Button(
-            bottom_frame, text="< Anterior", state="disabled", 
+            self.bottom_frame, text="< Anterior", state="disabled", 
             command=lambda: self.start_search_thread(offset_change=-self.hits_per_page)
         )
         self.prev_page_button.pack(side="left", padx=5)
         
         self.next_page_button = ttk.Button(
-            bottom_frame, text="Próxima >", state="disabled", 
+            self.bottom_frame, text="Próxima >", state="disabled", 
             command=lambda: self.start_search_thread(offset_change=self.hits_per_page)
         )
         self.next_page_button.pack(side="left", padx=5)
         
-        self.download_button = ttk.Button(bottom_frame, text="Baixar Selecionado", bootstyle="success-outline", command=self.start_download_thread)
+        self.download_button = ttk.Button(self.bottom_frame, text="Baixar Selecionado", bootstyle="success-outline", command=self.start_download_thread)
         self.download_button.pack(side="right")
         
         self.start_search_thread(offset_change=0)
@@ -310,12 +314,10 @@ class ModDownloader(tk.Toplevel):
             return
 
         # --- O 'Card' Principal ---
-        # (Usamos 'secondary' para o fundo cinza-claro do tema 'cyborg')
         mod_frame = ttk.Frame(self.list_frame, padding=10, bootstyle="secondary")
-        mod_frame.pack(fill="x", pady=(5, 0), padx=(5, 10)) # pady(5,0) para espaçar
+        mod_frame.pack(fill="x", pady=(5, 0), padx=(5, 10))
         
-        # Configura o grid do card
-        mod_frame.columnconfigure(1, weight=1) # Coluna do meio (título/desc) estica
+        mod_frame.columnconfigure(1, weight=1)
         
         # --- Coluna 0: Ícone ---
         icon_label = ttk.Label(mod_frame, image=self.default_mod_icon, bootstyle="secondary")
@@ -349,14 +351,23 @@ class ModDownloader(tk.Toplevel):
         ttk.Label(stats_frame, text=f"📥 {downloads:,} Downloads", bootstyle="secondary-inverse").pack(anchor="e")
         ttk.Label(stats_frame, text=f"⭐ {followers:,} Seguidores", bootstyle="secondary-inverse").pack(anchor="e")
         
-        # --- Bind de Clique ---
-        # Precisamos de um 'lambda' para passar os argumentos
+        # --- Bind de Clique (Simples e Duplo) ---
+        
+        # Clique Simples (seleciona)
         click_func = lambda e, p=project_id, f=mod_frame: self.on_mod_selected(e, p, f)
         
-        # Binda o clique em todos os widgets do card
+        # --- MUDANÇA AQUI ---
+        # Clique Duplo (abre detalhes)
+        double_click_func = lambda e, p=project_id, t=title, a=author: self.on_mod_double_clicked(e, p, t, a)
+        
         mod_frame.bind("<Button-1>", click_func)
+        mod_frame.bind("<Double-Button-1>", double_click_func) # <-- NOVO
+        
+        # Binda em todos os widgets filhos também
         for widget in mod_frame.winfo_children() + stats_frame.winfo_children():
             widget.bind("<Button-1>", click_func)
+            widget.bind("<Double-Button-1>", double_click_func) # <-- NOVO
+        # --- FIM DA MUDANÇA ---
 
     def start_search_thread(self, event=None, offset_change=0):
         """Inicia o thread de busca, com suporte a offset."""
@@ -542,6 +553,174 @@ class ModDownloader(tk.Toplevel):
         finally:
             self.after(0, self.download_button.config, {"state": "normal"})
 
+    
+    def on_mod_double_clicked(self, event, project_id, title, author):
+        """Chamado com um clique-duplo em um card de mod. (HANDLER)"""
+        print(f"[DEBUG] Abrindo detalhes para {project_id} ({title})")
+        # --- MUDANÇA AQUI ---
+        self.open_mod_details_view(project_id, title, author)
+        # --- FIM DA MUDANÇA ---
+
+    def open_mod_details_view(self, project_id, title, author):
+        """Esconde a lista e mostra a view de detalhes."""
+        
+        # 1. Esconde os frames da lista
+        if self.top_frame: self.top_frame.pack_forget()
+        if self.list_scroll_frame: self.list_scroll_frame.pack_forget()
+        if self.bottom_frame: self.bottom_frame.pack_forget()
+
+        # 2. Cria o novo frame de detalhes
+        self.details_frame = ttk.Frame(self.main_frame)
+        self.details_frame.pack(fill="both", expand=True)
+
+        # 3. Adiciona o botão "Voltar"
+        back_button = ttk.Button(
+            self.details_frame, 
+            text="⬅ Voltar para a lista", 
+            command=self.close_mod_details_view,
+            bootstyle="info-outline"
+        )
+        back_button.pack(anchor="w", pady=(0, 10))
+
+        # 4. Cria a Estrutura Rolável (para a descrição)
+        canvas = tk.Canvas(self.details_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.details_frame, orient="vertical", command=canvas.yview)
+        # Frame *dentro* do canvas
+        scrollable_frame = ttk.Frame(canvas, padding=15)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        self._bind_mousewheel(canvas)
+        self._bind_mousewheel(scrollable_frame)
+
+        # 5. Label de "Carregando..."
+        loading_label = ttk.Label(scrollable_frame, text="Buscando dados do Modrinth...", bootstyle="info")
+        loading_label.pack(pady=20)
+        
+        # 6. Inicia o Thread
+        threading.Thread(
+            target=self._fetch_and_show_details, 
+            args=(project_id, scrollable_frame, loading_label, title, author), 
+            daemon=True
+        ).start()
+
+    def close_mod_details_view(self):
+        """Destrói a view de detalhes e reexibe a lista."""
+        
+        # 1. Destrói o frame de detalhes
+        if self.details_frame:
+            self.details_frame.destroy()
+            self.details_frame = None
+            
+        # 2. Reexibe os frames originais
+        if self.top_frame: self.top_frame.pack(fill="x", pady=(0, 5))
+        if self.list_scroll_frame: self.list_scroll_frame.pack(fill="both", expand=True, pady=(10, 0))
+        if self.bottom_frame: self.bottom_frame.pack(fill="x", pady=(10, 0))
+
+    def _fetch_and_show_details(self, project_id, content_frame, loading_label, title, author):
+        """(THREAD) Busca os dados e preenche a janela de detalhes."""
+        try:
+            # 1. Busca os dados completos do projeto
+            url = f"https://api.modrinth.com/v2/project/{project_id}"
+            headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
+            resp = requests.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+            # 2. Prepara os dados para a UI
+            icon_url = data.get("icon_url")
+            body_markdown = data.get("body", "Sem descrição detalhada.")
+            downloads = data.get("downloads", 0)
+            followers = data.get("followers", 0)
+            game_versions = data.get("game_versions", [])
+            loaders = data.get("loaders", [])
+
+            # 3. Função de População (para rodar na thread principal)
+            def _populate_ui():
+                loading_label.destroy() # Remove o "Carregando"
+                
+                # --- Cabeçalho (Título, Autor, Ícone) ---
+                header_frame = ttk.Frame(content_frame)
+                header_frame.pack(fill="x", expand=True)
+                header_frame.columnconfigure(1, weight=1)
+                
+                icon_label = ttk.Label(header_frame, image=self.default_mod_icon)
+                icon_label.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 15))
+                
+                if icon_url:
+                    threading.Thread(target=self._load_mod_icon, args=(icon_label, icon_url), daemon=True).start()
+                
+                ttk.Label(header_frame, text=title, font=("Helvetica", 16, "bold"), wraplength=450).grid(row=0, column=1, sticky="w")
+                ttk.Label(header_frame, text=f"por {author}", font=("Helvetica", 11)).grid(row=1, column=1, sticky="w")
+                
+                # --- Stats (Downloads, Seguidores) ---
+                stats_frame = ttk.Frame(content_frame)
+                stats_frame.pack(fill="x", pady=10)
+                ttk.Label(stats_frame, text=f"📥 {downloads:,} Downloads", bootstyle="info").pack(side="left", padx=(0, 10))
+                ttk.Label(stats_frame, text=f"⭐ {followers:,} Seguidores", bootstyle="info").pack(side="left")
+
+                # --- Compatibilidade (Versões, Loaders) ---
+                ttk.Separator(content_frame).pack(fill="x", pady=(5, 10))
+                ttk.Label(content_frame, text="Compatibilidade", font=("Helvetica", 12, "bold")).pack(anchor="w")
+                
+                if game_versions:
+                    vers_text = f"Versões: {', '.join(game_versions[:10])}{'...' if len(game_versions) > 10 else ''}"
+                    ttk.Label(content_frame, text=vers_text, wraplength=550).pack(anchor="w", fill="x")
+                if loaders:
+                    ttk.Label(content_frame, text=f"Loaders: {', '.join(loaders)}", wraplength=550).pack(anchor="w", fill="x")
+
+                # --- MUDANÇA AQUI: Descrição (HTML Renderizado) ---
+                ttk.Separator(content_frame).pack(fill="x", pady=10)
+                ttk.Label(content_frame, text="Descrição", font=("Helvetica", 12, "bold")).pack(anchor="w", pady=(0, 5))
+
+                # 1. Inicializa o parser de Markdown
+                md = MarkdownIt()
+                # 2. Converte o Markdown da API para HTML
+                html_content = md.render(body_markdown)
+
+                # 3. Cria o widget que lê HTML
+                html_frame = ttk.Frame(content_frame) 
+                html_frame.pack(fill="x", expand=True)
+                
+                # Pega as cores do tema 'cyborg' para o HTML
+                # (O HTMLLabel não é um widget 'ttk', então precisa de estilo manual)
+                bg_color = "#2b3e50" 
+                text_color = "#adb5bd" 
+
+                html_label = HTMLLabel(
+                    html_frame, 
+                    html=html_content,
+                    background=bg_color,
+                    foreground=text_color,
+                    width=80 # Define um 'wraplength' aproximado
+                )
+                html_label.pack(fill="x", expand=True)
+                
+                # Binda a rolagem do mouse (IMPORTANTE para rolar a descrição)
+                # Tenta bindar em todos os sub-widgets que o HTMLLabel cria
+                try:
+                    self._bind_mousewheel(html_label.html_parser.text)
+                    self._bind_mousewheel(html_label)
+                except Exception as e:
+                    print(f"Aviso: Não foi possível bindar scroll do HTMLLabel: {e}")
+                # --- FIM DA MUDANÇA ---
+
+            # 4. Agenda a função de população na thread principal
+            self.after(0, _populate_ui)
+            
+        except Exception as e:
+            print(f"Erro ao buscar detalhes: {e}")
+            self.after(0, loading_label.config, {"text": f"Erro ao buscar dados: {e}", "bootstyle": "danger"})
+
 # --- Funções de Ajuda ---
 def offline_uuid_for(name: str) -> str:
     """Gera um UUID offline baseado no nome de usuário."""
@@ -572,7 +751,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.4.5"
+        self.LAUNCHER_VERSION = "v4.4.6"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -3102,12 +3281,12 @@ class RaposoLauncher(ttk.Window):
             self.discord_state = f"Jogando {modpack_name}"
             self.discord_details = f"Versão: {version}"
 
-            # --- MUDANÇA AQUI: Adicionamos o NeoForge ---
+            # --- Define ícone do Discord ---
             if "fabric" in version.lower():
-                self.discord_small_image = "fabric_icon" # O nome que você deu no portal
+                self.discord_small_image = "fabric_icon"
                 self.discord_small_text = "Jogando com Fabric"
             elif "neoforge" in version.lower():
-                self.discord_small_image = "neoforge_icon" # O nome que você deve subir no portal
+                self.discord_small_image = "neoforge_icon"
                 self.discord_small_text = "Jogando com NeoForge"
             elif "forge" in version.lower():
                 self.discord_small_image = "forge_icon"
@@ -3116,9 +3295,8 @@ class RaposoLauncher(ttk.Window):
                 self.discord_small_image = "optifine_icon"
                 self.discord_small_text = "Jogando com OptiFine"
             else:
-                self.discord_small_image = "default_icon" # Use o "default_icon" que você subiu
+                self.discord_small_image = "default_icon"
                 self.discord_small_text = "Jogando Minecraft"
-            # --- FIM DA MUDANÇA ---
 
             game_dir = os.path.join(MODPACKS_DIR, modpack)
             os.makedirs(game_dir, exist_ok=True)
@@ -3315,11 +3493,9 @@ class RaposoLauncher(ttk.Window):
             self.ui_queue.put({"type": "status", "text": "Construindo classpath..."})
             self.ui_queue.put({"type": "progress_start_indeterminate"}) 
             
-            # --- MUDANÇA AQUI: Trocado '[]' por 'set()' ---
             classpath_set = set()
             processed_libs = set() 
 
-            # --- MUDANÇA AQUI: Trocado '.append()' por '.add()' ---
             if os.path.exists(main_jar): classpath_set.add(main_jar)
             if parent_jar and os.path.exists(parent_jar): classpath_set.add(parent_jar)
 
@@ -3357,10 +3533,8 @@ class RaposoLauncher(ttk.Window):
                         continue 
                 
                 if lib_path and os.path.exists(lib_path):
-                    # --- MUDANÇA AQUI: Trocado '.append()' por '.add()' ---
                     classpath_set.add(lib_path)
             
-            # --- MUDANÇA AQUI: Trocado 'classpath_list' por 'classpath_set' ---
             classpath_str = (";" if os.name == "nt" else ":").join(classpath_set)
 
             # --- 6. Extrair Natives ---
@@ -3378,6 +3552,13 @@ class RaposoLauncher(ttk.Window):
             
             jvm_args = []
             game_args = []
+
+            # --- MUDANÇA CRÍTICA PARA O SEU ERRO ---
+            # Movido para o TOPO para garantir que execute SEMPRE
+            if platform.system().lower() == "darwin":
+                print("[DEBUG] MacOS detectado! Adicionando flag obrigatória -XstartOnFirstThread")
+                jvm_args.append("-XstartOnFirstThread")
+            # -----------------------------------------
             
             # --- 8. LÓGICA DE DUAS VIAS (MODERNA vs LEGADA) ---
             
@@ -3402,8 +3583,6 @@ class RaposoLauncher(ttk.Window):
                 jvm_args.append(f"-Xmx{ram_alloc}")
                 jvm_args.append(f"-Xms{ram_alloc}")
                 print(f"[DEBUG] Alocando RAM (do modpack): -Xmx{ram_alloc}")
-                if platform.system().lower() == "darwin":
-                    jvm_args.append("-XstartOnFirstThread")
                 
                 jvm_args.append(f"-Djava.library.path={natives_dir}") 
                 jvm_args.append("-cp") 
@@ -3453,9 +3632,6 @@ class RaposoLauncher(ttk.Window):
                 jvm_args.append(f"-Xmx{ram_alloc}")
                 jvm_args.append(f"-Xms{ram_alloc}")
                 print(f"[DEBUG] Alocando RAM (do modpack): -Xmx{ram_alloc}")
-                
-                if platform.system().lower() == "darwin":
-                    jvm_args.append("-XstartOnFirstThread")
                 
                 if is_modern_vanilla:
                     print("[DEBUG] Adicionando flag de modo offline do Authlib.")
