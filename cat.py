@@ -20,6 +20,8 @@ import pypresence
 import time
 from markdown_it import MarkdownIt
 from tkhtmlview import HTMLLabel
+from html.parser import HTMLParser # <-- ADICIONE ESTE
+from io import BytesIO, StringIO # <-- ADICIONE 'StringIO'
 
 
 try:
@@ -29,6 +31,8 @@ except ImportError:
     print("ERRO CRÍTICO: A biblioteca 'Pillow' não foi encontrada.")
     print("Por favor, execute: pip install pillow")
     exit() # Fecha o script
+
+
 
 BASE_DIR = os.path.dirname(__file__)
 MODPACKS_DIR = os.path.join(BASE_DIR, "modpacks")
@@ -42,8 +46,26 @@ VERSIONS_DIR = None
 LIBRARIES_DIR = None
 ASSETS_DIR = None
 
-# (Não se esqueça de ter o 'from io import BytesIO' e 'from PIL import Image, ImageTk, ImageOps'
-# no topo do seu arquivo cat.py)
+# --- NOVAS FUNÇÕES DE AJUDA (PARA LIMPAR HTML) ---
+
+class MLStripper(HTMLParser):
+    """Uma classe simples para remover tags HTML de uma string."""
+    def __init__(self):
+        super().__init__()
+        self.reset()
+        self.strict = False
+        self.convert_charrefs= True
+        self.text = StringIO()
+    def handle_data(self, d):
+        self.text.write(d)
+    def get_data(self):
+        return self.text.getvalue()
+
+def strip_tags(html):
+    """Recebe uma string HTML e retorna apenas o texto puro."""
+    s = MLStripper()
+    s.feed(html)
+    return s.get_data()
 
 class ModDownloader(tk.Toplevel):
     """Uma janela Toplevel para pesquisar e baixar mods do Modrinth,
@@ -113,6 +135,7 @@ class ModDownloader(tk.Toplevel):
         self.default_mod_icon = None
         self.mod_icons = {} 
         self.selected_project_id = None
+        self.selected_project_title = None # <-- NOVO
         self.selected_frame = None
         
         self.current_offset = 0
@@ -149,7 +172,9 @@ class ModDownloader(tk.Toplevel):
         self.category_combo = ttk.Combobox(
             self.top_frame,
             state="readonly",
-            values=["Mods", "Resource Packs", "Shaders"],
+            # --- MUDANÇA AQUI ---
+            values=["Mods", "Resource Packs", "Shaders", "Modpacks"],
+            # --- FIM DA MUDANÇA ---
             width=20 
         )
         self.category_combo.grid(row=1, column=0, sticky="w", padx=(0, 10))
@@ -224,7 +249,11 @@ class ModDownloader(tk.Toplevel):
         elif selected_category == "Resource Packs":
             self.current_project_type = "resourcepack"
         elif selected_category == "Shaders":
-            self.current_project_type = "shader" # Corrigido para "shader" (API do Modrinth)
+            self.current_project_type = "shader"
+        # --- MUDANÇA AQUI ---
+        elif selected_category == "Modpacks":
+            self.current_project_type = "modpack"
+        # --- FIM DA MUDANÇA ---
         else:
             self.current_project_type = "mod" # Padrão
             
@@ -256,6 +285,44 @@ class ModDownloader(tk.Toplevel):
         elif event.num == 5:
             self.canvas.yview_scroll(1, "units")
 
+    def _on_details_canvas_configure(self, event, canvas, canvas_window_id):
+        """
+        (MODIFICADO) Chamado quando o canvas da VIEW DE DETALHES é redimensionado.
+        Força o frame *interno* a ter a mesma largura do canvas *externo*.
+        TAMBÉM re-calcula a largura do HTMLLabel.
+        """
+        # Pega a largura ATUAL do canvas (a "janela" visível)
+        canvas_width = event.width
+        
+        # 1. Atualiza a largura do 'scrollable_frame' (que está *dentro* do canvas)
+        canvas.itemconfig(canvas_window_id, width=canvas_width)
+        
+        # --- MUDANÇA AQUI ---
+        # 2. Se o HTMLLabel já foi criado, atualiza a sua largura
+        if self.details_html_label and self.details_scroll_frame:
+            try:
+                # Pega a largura do frame (que agora é a largura do canvas)
+                # O 'self.details_scroll_frame' é o 'content_frame'
+                width_pixels = self.details_scroll_frame.winfo_width()
+                
+                # Converte para caracteres
+                char_width = 8 
+                padding_pixels = 30 # (padding=15 * 2)
+                width_in_chars = max(10, (width_pixels - padding_pixels) // char_width)
+                
+                # Reconfigura o HTMLLabel com a nova largura
+                self.details_html_label.configure(width=width_in_chars)
+                
+                # Força a atualização da altura (isto é o que faltava!)
+                # O 'update_idletasks()' força o HTMLLabel a calcular sua
+                # nova altura, o que dispara o bind <Configure> do 
+                # 'scrollable_frame' (Passo 1), que atualiza a 'scrollregion'.
+                self.details_scroll_frame.update_idletasks()
+
+            except Exception as e:
+                print(f"Erro ao reconfigurar HTMLLabel: {e}")
+        # --- FIM DA MUDANÇA ---
+
     # --- Funções de UI Atualizadas ---
 
     def set_status(self, text, style=INFO):
@@ -286,7 +353,36 @@ class ModDownloader(tk.Toplevel):
             # Se falhar, ele fica com o ícone padrão que já foi setado
             print(f"Erro ao carregar ícone {icon_url}: {e}")
 
-    def on_mod_selected(self, event, project_id, frame):
+    def _load_gallery_image(self, image_label, image_url, max_width=550):
+        """(THREAD) Baixa uma imagem da galeria, redimensiona e exibe no label."""
+        try:
+            headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
+            resp = requests.get(image_url, headers=headers)
+            resp.raise_for_status()
+            
+            img_data = BytesIO(resp.content)
+            img = Image.open(img_data)
+            
+            # Redimensiona mantendo o aspecto
+            if img.width > max_width:
+                w_percent = (max_width / float(img.width))
+                h_size = int((float(img.height) * float(w_percent)))
+                img = img.resize((max_width, h_size), Image.Resampling.LANCZOS)
+            
+            # Converte para o Tkinter
+            photo = ImageTk.PhotoImage(img)
+            
+            # Guarda a referência para o Tkinter não "perder" a imagem
+            self.gallery_photos.append(photo) 
+            
+            # Agenda a atualização da imagem na thread da UI
+            self.after(0, image_label.config, {"image": photo, "text": ""}) # Remove o texto "Carregando"
+            
+        except Exception as e:
+            print(f"Erro ao carregar imagem da galeria {image_url}: {e}")
+            self.after(0, image_label.config, {"text": "Erro ao carregar imagem."})
+
+    def on_mod_selected(self, event, project_id, frame, title, author):
         """Chamado quando um 'card' de mod é clicado."""
         
         # 1. Desmarca o card antigo (se houver)
@@ -302,10 +398,13 @@ class ModDownloader(tk.Toplevel):
         # 3. Salva a referência
         self.selected_frame = frame
         self.selected_project_id = project_id
+        # --- MUDANÇA AQUI ---
+        self.selected_project_title = title # Salva o título
+        # --- FIM DA MUDANÇA ---
         
         # Habilita o botão de download
         self.download_button.config(state="normal")
-        
+
     def _create_mod_widget(self, mod_data):
         """Cria o 'card' de mod individual e o adiciona na lista."""
         
@@ -353,21 +452,21 @@ class ModDownloader(tk.Toplevel):
         
         # --- Bind de Clique (Simples e Duplo) ---
         
-        # Clique Simples (seleciona)
-        click_func = lambda e, p=project_id, f=mod_frame: self.on_mod_selected(e, p, f)
+        # --- MUDANÇA AQUI (CORREÇÃO DO BUG) ---
+        # O clique simples (seleciona) agora TAMBÉM passa o 'title' e 'author'
+        click_func = lambda e, p=project_id, f=mod_frame, t=title, a=author: self.on_mod_selected(e, p, f, t, a)
+        # --- FIM DA MUDANÇA ---
         
-        # --- MUDANÇA AQUI ---
         # Clique Duplo (abre detalhes)
         double_click_func = lambda e, p=project_id, t=title, a=author: self.on_mod_double_clicked(e, p, t, a)
         
         mod_frame.bind("<Button-1>", click_func)
-        mod_frame.bind("<Double-Button-1>", double_click_func) # <-- NOVO
+        mod_frame.bind("<Double-Button-1>", double_click_func)
         
         # Binda em todos os widgets filhos também
         for widget in mod_frame.winfo_children() + stats_frame.winfo_children():
             widget.bind("<Button-1>", click_func)
-            widget.bind("<Double-Button-1>", double_click_func) # <-- NOVO
-        # --- FIM DA MUDANÇA ---
+            widget.bind("<Double-Button-1>", double_click_func)
 
     def start_search_thread(self, event=None, offset_change=0):
         """Inicia o thread de busca, com suporte a offset."""
@@ -416,10 +515,10 @@ class ModDownloader(tk.Toplevel):
                 [f"project_type:{self.current_project_type}"]
             ]
             
-            # --- CORREÇÃO AQUI ---
-            # 1. Adiciona a versão do jogo APENAS se NÃO for shader
-            if self.current_project_type != "shader": # Usando a sua correção
-            # --- FIM DA CORREÇÃO ---
+            # --- MUDANÇA AQUI ---
+            # 1. Adiciona a versão do jogo APENAS se NÃO for shader E NÃO for modpack
+            if self.current_project_type != "shader" and self.current_project_type != "modpack":
+            # --- FIM DA MUDANÇA ---
                 facets_list.append([f"versions:{self.game_version}"])
 
             # 2. Adiciona o loader APENAS se for um mod
@@ -474,13 +573,44 @@ class ModDownloader(tk.Toplevel):
         
         project_id = self.selected_project_id
         if not project_id: 
-            return messagebox.showerror("Erro", "Selecione um mod na lista para baixar.", parent=self)
+            return messagebox.showerror("Erro", "Selecione um item na lista para baixar.", parent=self)
             
+        # --- MUDANÇA AQUI: Intercepta o download de Modpack ---
+        if self.current_project_type == "modpack":
+            
+            project_title = self.selected_project_title
+            
+            # --- MUDANÇA AQUI (CORREÇÃO DO BUG) ---
+            # Limpa o nome do título ANTES de checar se a pasta existe
+            # Remove caracteres ilegais: \ / : * ? " < > |
+            sanitized_title = re.sub(r'[\\/:*?"<>|]', '', project_title).strip()
+            if not sanitized_title: # Se o nome era só ":", por exemplo
+                sanitized_title = f"modpack_{project_id}"
+            # --- FIM DA MUDANÇA ---
+            
+            # Checa se o modpack já existe (com o nome limpo)
+            target_dir = os.path.join(MODPACKS_DIR, sanitized_title) # <-- USA O NOME LIMPO
+            
+            if os.path.exists(target_dir):
+                # Mostra o nome bonito no erro, mas usa o nome limpo na checagem
+                messagebox.showerror("Erro", f"Um modpack com o nome '{project_title}' (pasta: '{sanitized_title}') já existe! Apague o antigo primeiro.", parent=self)
+                return
+            
+            self.set_status(f"Iniciando instalação do modpack {project_title}...", INFO)
+            self.download_button.config(state="disabled")
+            
+            # Inicia o thread de INSTALAÇÃO
+            # Passa o 'project_title' original (bonito) e o ID
+            threading.Thread(target=self._install_modpack_thread, args=(project_id, project_title), daemon=True).start()
+            return # Impede que o código de download normal execute
+        # --- FIM DA INTERCEPTAÇÃO ---
+
+        # O código abaixo só executa se NÃO for um modpack
         self.set_status(f"Buscando versão para {project_id}...", INFO)
         self.download_button.config(state="disabled")
         
         threading.Thread(target=self._download_thread, args=(project_id,), daemon=True).start()
-        
+
     def _download_thread(self, project_id):
         """(THREAD) Busca a versão correta e baixa para a pasta certa."""
         try:
@@ -553,7 +683,219 @@ class ModDownloader(tk.Toplevel):
         finally:
             self.after(0, self.download_button.config, {"state": "normal"})
 
-    
+    def _install_modpack_thread(self, project_id, project_title):
+        """(THREAD) Baixa, descompacta e instala um modpack .mrpack"""
+        
+        temp_mrpack_path = None
+        temp_extract_dir = os.path.join(BASE_DIR, f"temp_mrpack_{project_id}")
+        
+        # Define um 'new_pack_name' inicial (limpo) para o caso de erro
+        sanitized_title = re.sub(r'[\\/:*?"<>|]', '', project_title).strip()
+        if not sanitized_title: sanitized_title = f"modpack_{project_id}"
+        new_pack_name = sanitized_title # Nome limpo
+        
+        try:
+            # --- 1. Encontrar a URL do .mrpack ---
+            self.after(0, self.set_status, "Buscando o arquivo .mrpack...")
+            headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
+            
+            url = f"https://api.modrinth.com/v2/project/{project_id}/version"
+            resp = requests.get(url, params={"loaders": "null", "game_versions": "null"}, headers=headers)
+            resp.raise_for_status()
+            versions = resp.json()
+            if not versions:
+                raise Exception("Nenhuma versão encontrada para este modpack.")
+            latest_version = versions[0]
+            mrpack_file_info = None
+            for f in latest_version.get("files", []):
+                if f.get("filename", "").endswith(".mrpack"):
+                    mrpack_file_info = f
+                    break
+            if not mrpack_file_info:
+                raise Exception("Nenhum arquivo .mrpack encontrado na versão mais recente.")
+            
+            file_url = mrpack_file_info.get("url")
+            file_name = mrpack_file_info.get("filename")
+            
+            # --- 2. Baixar o .mrpack ---
+            self.after(0, self.set_status, f"Baixando {file_name}...")
+            temp_mrpack_path = os.path.join(BASE_DIR, file_name)
+            self.launcher.download_file(file_url, temp_mrpack_path, file_name)
+            
+            # --- 3. Descompactar e Ler o Manifesto ---
+            self.after(0, self.set_status, "Lendo o manifesto do modpack...")
+            if os.path.exists(temp_extract_dir):
+                shutil.rmtree(temp_extract_dir) 
+            with zipfile.ZipFile(temp_mrpack_path, 'r') as zf:
+                zf.extractall(temp_extract_dir)
+            manifest_path = os.path.join(temp_extract_dir, "modrinth.index.json")
+            if not os.path.exists(manifest_path):
+                raise Exception("Arquivo .mrpack inválido (não contém modrinth.index.json).")
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+            
+            # --- 4. Preparar o Novo Modpack ---
+            manifest_name = manifest.get("name", project_title)
+            
+            # Remove caracteres ilegais (como ':') do nome da pasta
+            new_pack_name = re.sub(r'[\\/:*?"<>|]', '', manifest_name).strip()
+            
+            if not new_pack_name:
+                new_pack_name = f"modpack_{project_id}"
+            
+            target_dir = os.path.join(MODPACKS_DIR, new_pack_name)
+            
+            if os.path.exists(target_dir):
+                raise Exception(f"O modpack '{new_pack_name}' (do manifesto) já existe!")
+                
+            os.makedirs(target_dir, exist_ok=True) 
+            print(f"[DEBUG] Criando novo modpack em: {target_dir}")
+
+            # --- 5. Copiar Overrides ---
+            self.after(0, self.set_status, "Copiando arquivos de configuração...")
+            overrides_dir = os.path.join(temp_extract_dir, "overrides")
+            if os.path.exists(overrides_dir):
+                print(f"[DEBUG] Copiando 'overrides' para {target_dir}")
+                shutil.copytree(overrides_dir, target_dir, dirs_exist_ok=True)
+            
+            # --- 6. Baixar todos os arquivos (Mods, Resource Packs, etc.) ---
+            files_to_download = manifest.get("files", [])
+            total_files = len(files_to_download)
+            
+            if not files_to_download:
+                print("[AVISO] Este modpack não tem nenhum arquivo no manifesto.")
+            else:
+                print(f"[DEBUG] {total_files} arquivos para baixar...")
+                tasks = []
+                for file_info in files_to_download:
+                    file_target_path_str = file_info.get("path")
+                    file_download_url = file_info.get("downloads", [None])[0]
+                    if not file_target_path_str or not file_download_url:
+                        print(f"[AVISO] Entrada de arquivo inválida no manifesto: {file_info.get('path')}")
+                        continue
+                    target_file_path = os.path.join(target_dir, file_target_path_str)
+                    os.makedirs(os.path.dirname(target_file_path), exist_ok=True)
+                    file_dl_name = file_target_path_str.split('/')[-1]
+                    tasks.append( (file_download_url, target_file_path, file_dl_name) )
+
+                self.after(0, self.launcher.progressbar.config, {"mode": "determinate", "maximum": total_files, "value": 0})
+                completed_count = 0
+                last_reported_percent = -1
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = {
+                        executor.submit(self.launcher.download_file, url, path, filename): filename 
+                        for (url, path, filename) in tasks
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        filename = futures[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            print(f"FALHA no download do arquivo {filename}: {e}")
+                        completed_count += 1
+                        current_percent = int((completed_count / total_files) * 100)
+                        if current_percent > last_reported_percent:
+                            self.after(0, self.launcher.progressbar.config, {"value": completed_count})
+                            self.after(0, self.set_status, f"Baixando arquivos ({current_percent}%)")
+                            last_reported_percent = current_percent
+            
+            # --- 7. Criar o config.json (A PARTE MAIS IMPORTANTE) ---
+            self.after(0, self.set_status, "Criando perfil do modpack...")
+            deps = manifest.get("dependencies", {})
+            mc_version = deps.get("minecraft")
+            
+            if not mc_version:
+                 raise Exception("Manifesto não especifica uma versão do Minecraft.")
+            
+            loader_id = "forge" if "forge" in deps else "neoforge" if "neoforge" in deps else "fabric" if "fabric" in deps else None
+            loader_version = deps.get(loader_id)
+            
+            guessed_version_id = mc_version
+            if loader_id and loader_version:
+                guessed_version_id = f"{mc_version}-{loader_id}-{loader_version}"
+            
+            # --- MUDANÇA AQUI (LÓGICA DO JAVA CORRIGIDA) ---
+            java_guess = "java17" # Padrão
+            ram_guess = "4G"     # Padrão
+            
+            try:
+                # Usa a função _version_key da classe principal do launcher
+                v_key = self.launcher._version_key(mc_version) 
+                
+                if v_key >= (1, 20, 5):
+                    # Versões 1.20.5+ (incluindo 1.21) exigem Java 21
+                    java_guess = "java21"
+                    ram_guess = "8G"
+                elif v_key >= (1, 17):
+                    # Versões 1.17 até 1.20.4 exigem Java 17
+                    java_guess = "java17"
+                    ram_guess = "8G"
+                else: 
+                    # Versões 1.16.5 e mais antigas usam Java 8
+                    java_guess = "java8"
+                    ram_guess = "4G"
+                    
+            except Exception as e:
+                print(f"[AVISO] Falha ao adivinhar o Java para '{mc_version}'. Usando Java 17. Erro: {e}")
+                java_guess = "java17" # Padrão seguro
+                ram_guess = "8G"
+            # --- FIM DA MUDANÇA ---
+
+            # Salva o config.json do launcher
+            config_data = {
+                "name": new_pack_name, # Usa o nome limpo
+                "version": guessed_version_id,
+                "java": java_guess,
+                "ram": ram_guess
+            }
+            self.launcher.save_modpack_config(new_pack_name, config_data)
+
+            # --- 8. Sucesso ---
+            self.after(0, self.set_status, f"Modpack '{new_pack_name}' instalado!", SUCCESS)
+            
+            self.launcher.ui_queue.put({
+                "type": "popup_success",
+                "title": "Modpack Instalado",
+                "text": f"Modpack '{new_pack_name}' foi instalado com sucesso!\n\n"
+                        f"AVISO: O launcher tentou adivinhar a versão do jogo ('{guessed_version_id}').\n"
+                        "Se o jogo não iniciar, clique em 'Editar' e selecione a versão correta do Forge/Fabric/NeoForge que você baixou."
+            })
+            
+            # Recarrega a lista de modpacks no launcher (thread-safe)
+            self.after(0, self.launcher.load_selections)
+            self.after(0, self.launcher.selection_combo.set, new_pack_name) 
+            self.after(0, self.launcher.on_modpack_selected)
+
+        except Exception as e:
+            error_message = f"Erro ao instalar modpack: {e}"
+            print(f"[ERRO] {error_message}")
+            import traceback
+            traceback.print_exc()
+            self.after(0, self.set_status, error_message, DANGER)
+            
+            try:
+                target_dir_fallback = os.path.join(MODPACKS_DIR, new_pack_name)
+                if os.path.exists(target_dir_fallback):
+                    shutil.rmtree(target_dir_fallback)
+                    print(f"[DEBUG] Instalação falha removida de: {target_dir_fallback}")
+            except Exception as e_clean:
+                print(f"[ERRO] Falha ao limpar pasta de instalação: {e_clean}")
+                
+        finally:
+            # --- 9. Limpeza ---
+            try:
+                if temp_mrpack_path and os.path.exists(temp_mrpack_path):
+                    os.remove(temp_mrpack_path)
+                if os.path.exists(temp_extract_dir):
+                    shutil.rmtree(temp_extract_dir)
+                print("[DEBUG] Arquivos temporários do .mrpack removidos.")
+            except Exception as e:
+                print(f"[AVISO] Falha ao limpar arquivos temporários: {e}")
+
+            # Reabilita o botão e limpa a barra
+            self.after(0, self.download_button.config, {"state": "normal"})
+            self.after(0, self.launcher.progressbar.config, {"mode": "determinate", "value": 0})
+
     def on_mod_double_clicked(self, event, project_id, title, author):
         """Chamado com um clique-duplo em um card de mod. (HANDLER)"""
         print(f"[DEBUG] Abrindo detalhes para {project_id} ({title})")
@@ -582,12 +924,12 @@ class ModDownloader(tk.Toplevel):
         )
         back_button.pack(anchor="w", pady=(0, 10))
 
-        # 4. Cria a Estrutura Rolável (para a descrição)
+        # 4. Cria a Estrutura Rolável (Simplificada)
         canvas = tk.Canvas(self.details_frame, highlightthickness=0)
         scrollbar = ttk.Scrollbar(self.details_frame, orient="vertical", command=canvas.yview)
-        # Frame *dentro* do canvas
         scrollable_frame = ttk.Frame(canvas, padding=15)
 
+        # BIND 1: Atualiza a *região de rolagem*
         scrollable_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
@@ -601,6 +943,14 @@ class ModDownloader(tk.Toplevel):
         
         self._bind_mousewheel(canvas)
         self._bind_mousewheel(scrollable_frame)
+        
+        # --- MUDANÇA AQUI ---
+        self.gallery_photos = []
+        # Mapa para guardar os dados de download (URL, nome) de cada versão
+        self.version_data_map = {} 
+        # Referência para o widget da lista de versões
+        self.version_treeview = None 
+        # --- FIM DA MUDANÇA ---
 
         # 5. Label de "Carregando..."
         loading_label = ttk.Label(scrollable_frame, text="Buscando dados do Modrinth...", bootstyle="info")
@@ -613,6 +963,60 @@ class ModDownloader(tk.Toplevel):
             daemon=True
         ).start()
 
+    def start_specific_download_thread(self):
+        """
+        (HANDLER) Pega a versão selecionada no Treeview e
+        inicia o thread de download para ela.
+        """
+        if not self.version_treeview:
+            return # A UI ainda não foi criada
+            
+        try:
+            selected_item = self.version_treeview.selection()[0] # Pega o IID
+        except IndexError:
+            self.set_status("Nenhuma versão selecionada na lista!", WARNING)
+            return
+
+        if selected_item not in self.version_data_map:
+            self.set_status(f"Erro: Dados não encontrados para a versão {selected_item}", DANGER)
+            return
+            
+        file_data = self.version_data_map[selected_item]
+        file_url = file_data["url"]
+        file_name = file_data["filename"]
+        
+        # Determina a pasta de destino (igual ao _download_thread)
+        target_dir = self.mods_dir 
+        if self.current_project_type == "resourcepack":
+            target_dir = self.resourcepacks_dir
+        elif self.current_project_type == "shader":
+            target_dir = self.shaderpacks_dir
+        elif self.current_project_type == "modpack":
+            # Se for um modpack, chama o instalador de modpack
+            # (O project_id está no 'selected_item' se precisarmos, mas
+            # a seleção da lista de versões é para mods/shaders/packs)
+            self.set_status("Use o botão 'Baixar' da lista principal para instalar modpacks.", WARNING)
+            return
+            
+        target_path = os.path.join(target_dir, file_name)
+
+        self.set_status(f"Baixando {file_name}...", INFO)
+        
+        # Inicia o worker de download em um thread
+        threading.Thread(
+            target=self._specific_download_worker, 
+            args=(file_url, target_path, file_name), 
+            daemon=True
+        ).start()
+
+    def _specific_download_worker(self, url, path, filename):
+        """(THREAD) O worker que de fato baixa o arquivo."""
+        try:
+            self.launcher.download_file(url, path, filename)
+            self.after(0, self.set_status, f"✅ {filename} baixado!", SUCCESS)
+        except Exception as e:
+            self.after(0, self.set_status, f"Erro ao baixar {filename}: {e}", DANGER)
+
     def close_mod_details_view(self):
         """Destrói a view de detalhes e reexibe a lista."""
         
@@ -621,44 +1025,70 @@ class ModDownloader(tk.Toplevel):
             self.details_frame.destroy()
             self.details_frame = None
             
-        # 2. Reexibe os frames originais
+        # --- MUDANÇA AQUI ---
+        # 2. Limpa as listas de referências
+        self.gallery_photos.clear()
+        self.version_data_map.clear()
+        self.version_treeview = None
+        # --- FIM DA MUDANÇA ---
+            
+        # 3. Reexibe os frames originais
         if self.top_frame: self.top_frame.pack(fill="x", pady=(0, 5))
         if self.list_scroll_frame: self.list_scroll_frame.pack(fill="both", expand=True, pady=(10, 0))
         if self.bottom_frame: self.bottom_frame.pack(fill="x", pady=(10, 0))
 
     def _fetch_and_show_details(self, project_id, content_frame, loading_label, title, author):
-        """(THREAD) Busca os dados e preenche a janela de detalhes."""
+        """(THREAD) Busca os dados E AS VERSÕES e preenche a janela de detalhes."""
         try:
-            # 1. Busca os dados completos do projeto
+            # --- 1. Busca os dados completos do projeto ---
             url = f"https://api.modrinth.com/v2/project/{project_id}"
             headers = {'User-Agent': f'RaposoLauncher/{self.launcher.LAUNCHER_VERSION}'}
             resp = requests.get(url, headers=headers)
             resp.raise_for_status()
             data = resp.json()
 
-            # 2. Prepara os dados para a UI
+            # --- 2. Busca os dados das VERSÕES ---
+            # (Não aplicamos filtros, queremos TODAS as versões)
+            versions_url = f"https://api.modrinth.com/v2/project/{project_id}/version"
+            resp_versions = requests.get(versions_url, headers=headers)
+            resp_versions.raise_for_status()
+            versions_data = resp_versions.json()
+            
+            # --- 3. Prepara os dados para a UI ---
             icon_url = data.get("icon_url")
-            body_markdown = data.get("body", "Sem descrição detalhada.")
+            project_slug = data.get("slug") 
+            body_markdown = data.get("body", "Sem descrição.")
             downloads = data.get("downloads", 0)
             followers = data.get("followers", 0)
             game_versions = data.get("game_versions", [])
             loaders = data.get("loaders", [])
+            gallery_data = data.get("gallery", [])
 
-            # 3. Função de População (para rodar na thread principal)
-            def _populate_ui():
+            # Limpa o Markdown para texto puro
+            plain_text_description = body_markdown
+            try:
+                md = MarkdownIt()
+                html_content = md.render(body_markdown)
+                plain_text_description = strip_tags(html_content)
+            except Exception as e:
+                print(f"Erro ao limpar Markdown: {e}")
+            
+            # --- 4. Função de População (para rodar na thread principal) ---
+            # (Agora ela aceita 'versions_data' como argumento)
+            def _populate_ui(project_data, all_versions):
                 loading_label.destroy() # Remove o "Carregando"
+                
+                # --- Seções Antigas (Sem mudanças) ---
+                # Cabeçalho, Stats, Compatibilidade, Descrição, Galeria...
                 
                 # --- Cabeçalho (Título, Autor, Ícone) ---
                 header_frame = ttk.Frame(content_frame)
                 header_frame.pack(fill="x", expand=True)
                 header_frame.columnconfigure(1, weight=1)
-                
                 icon_label = ttk.Label(header_frame, image=self.default_mod_icon)
                 icon_label.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 15))
-                
                 if icon_url:
                     threading.Thread(target=self._load_mod_icon, args=(icon_label, icon_url), daemon=True).start()
-                
                 ttk.Label(header_frame, text=title, font=("Helvetica", 16, "bold"), wraplength=450).grid(row=0, column=1, sticky="w")
                 ttk.Label(header_frame, text=f"por {author}", font=("Helvetica", 11)).grid(row=1, column=1, sticky="w")
                 
@@ -671,55 +1101,150 @@ class ModDownloader(tk.Toplevel):
                 # --- Compatibilidade (Versões, Loaders) ---
                 ttk.Separator(content_frame).pack(fill="x", pady=(5, 10))
                 ttk.Label(content_frame, text="Compatibilidade", font=("Helvetica", 12, "bold")).pack(anchor="w")
-                
                 if game_versions:
                     vers_text = f"Versões: {', '.join(game_versions[:10])}{'...' if len(game_versions) > 10 else ''}"
                     ttk.Label(content_frame, text=vers_text, wraplength=550).pack(anchor="w", fill="x")
                 if loaders:
                     ttk.Label(content_frame, text=f"Loaders: {', '.join(loaders)}", wraplength=550).pack(anchor="w", fill="x")
 
-                # --- MUDANÇA AQUI: Descrição (HTML Renderizado) ---
+                # --- Descrição (Texto Limpo) ---
                 ttk.Separator(content_frame).pack(fill="x", pady=10)
                 ttk.Label(content_frame, text="Descrição", font=("Helvetica", 12, "bold")).pack(anchor="w", pady=(0, 5))
-
-                # 1. Inicializa o parser de Markdown
-                md = MarkdownIt()
-                # 2. Converte o Markdown da API para HTML
-                html_content = md.render(body_markdown)
-
-                # 3. Cria o widget que lê HTML
-                html_frame = ttk.Frame(content_frame) 
-                html_frame.pack(fill="x", expand=True)
-                
-                # Pega as cores do tema 'cyborg' para o HTML
-                # (O HTMLLabel não é um widget 'ttk', então precisa de estilo manual)
-                bg_color = "#2b3e50" 
-                text_color = "#adb5bd" 
-
-                html_label = HTMLLabel(
-                    html_frame, 
-                    html=html_content,
-                    background=bg_color,
-                    foreground=text_color,
-                    width=80 # Define um 'wraplength' aproximado
+                ttk.Label(
+                    content_frame, 
+                    text=plain_text_description, # Usa o texto processado
+                    wraplength=550,              # Quebra a linha
+                    justify="left"
+                ).pack(fill="x", pady=(0, 15))
+                open_button = ttk.Button(
+                    content_frame,
+                    text="Ver descrição formatada (com imagens) no Navegador", 
+                    command=lambda s=project_slug: self._open_mod_page(s),
+                    bootstyle="primary-outline"
                 )
-                html_label.pack(fill="x", expand=True)
+                open_button.pack(fill="x")
                 
-                # Binda a rolagem do mouse (IMPORTANTE para rolar a descrição)
-                # Tenta bindar em todos os sub-widgets que o HTMLLabel cria
-                try:
-                    self._bind_mousewheel(html_label.html_parser.text)
-                    self._bind_mousewheel(html_label)
-                except Exception as e:
-                    print(f"Aviso: Não foi possível bindar scroll do HTMLLabel: {e}")
+                # --- Seção da Galeria (Sem mudanças) ---
+                if gallery_data:
+                    ttk.Separator(content_frame).pack(fill="x", pady=(15, 10))
+                    ttk.Label(content_frame, text="Galeria", font=("Helvetica", 12, "bold")).pack(anchor="w", pady=(0, 10))
+                    gallery_frame = ttk.Frame(content_frame)
+                    gallery_frame.pack(fill="x")
+                    for i, image_info in enumerate(gallery_data[:5]):
+                        image_url = image_info.get("url")
+                        if not image_url: continue
+                        img_label = ttk.Label(gallery_frame, text=f"Carregando imagem {i+1}...", bootstyle="secondary")
+                        img_label.pack(pady=5)
+                        threading.Thread(target=self._load_gallery_image, args=(img_label, image_url, 550), daemon=True).start()
+                
+
+                # --- MUDANÇA AQUI: Seção de Versões (NOVA) ---
+                
+                # Não mostra esta seção para Modpacks (eles usam um instalador diferente)
+                if self.current_project_type != "modpack" and all_versions:
+                    ttk.Separator(content_frame).pack(fill="x", pady=(15, 10))
+                    ttk.Label(content_frame, text="Versões Disponíveis", font=("Helvetica", 12, "bold")).pack(anchor="w", pady=(0, 10))
+                    
+                    # Frame para o Treeview e a Scrollbar
+                    tree_frame = ttk.Frame(content_frame)
+                    tree_frame.pack(fill="x")
+                    
+                    # Colunas
+                    columns = ("nome", "tipo", "versoes_mc", "loaders")
+                    self.version_treeview = ttk.Treeview(
+                        tree_frame, 
+                        columns=columns, 
+                        show="headings", 
+                        height=8 # Mostra 8 itens, depois scroll
+                    )
+                    
+                    # Cabeçalhos
+                    self.version_treeview.heading("nome", text="Nome")
+                    self.version_treeview.heading("tipo", text="Tipo")
+                    self.version_treeview.heading("versoes_mc", text="Versões")
+                    self.version_treeview.heading("loaders", text="Loader")
+                    
+                    # Tamanhos
+                    self.version_treeview.column("nome", width=180, anchor="w")
+                    self.version_treeview.column("tipo", width=80, anchor="center")
+                    self.version_treeview.column("versoes_mc", width=150, anchor="w")
+                    self.version_treeview.column("loaders", width=100, anchor="w")
+
+                    # Scrollbar
+                    tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.version_treeview.yview)
+                    self.version_treeview.configure(yscrollcommand=tree_scroll.set)
+                    
+                    tree_scroll.pack(side="right", fill="y")
+                    self.version_treeview.pack(side="left", fill="x", expand=True)
+
+                    # Limpa o mapa de dados
+                    self.version_data_map.clear()
+
+                    # Preenche o Treeview
+                    for version in all_versions:
+                        version_id = version.get("id")
+                        if not version_id:
+                            continue
+                        
+                        # Pega o arquivo principal (o primeiro da lista)
+                        primary_file = version.get("files", [{}])[0]
+                        file_url = primary_file.get("url")
+                        file_name = primary_file.get("filename")
+                        
+                        if not file_url or not file_name:
+                            continue # Versão sem arquivo principal
+
+                        # Salva os dados de download
+                        self.version_data_map[version_id] = {
+                            "url": file_url,
+                            "filename": file_name
+                        }
+                        
+                        # Prepara os dados para a UI
+                        nome_versao = version.get("name", "Versão Desconhecida")
+                        tipo_versao = version.get("version_type", "-")
+                        versoes_jogo = ", ".join(version.get("game_versions", []))
+                        loaders_lista = ", ".join(version.get("loaders", []))
+
+                        # Insere na lista
+                        # O 'iid' é o ID da versão, que usaremos para o download
+                        self.version_treeview.insert(
+                            "", # Parente (raiz)
+                            "end", # Posição
+                            iid=version_id,
+                            values=(nome_versao, tipo_versao, versoes_jogo, loaders_lista)
+                        )
+                        
+                    # Botão de Download
+                    download_v_button = ttk.Button(
+                        content_frame,
+                        text="Baixar Versão Selecionada",
+                        command=self.start_specific_download_thread, # <-- Chama a nova função
+                        bootstyle="success-outline"
+                    )
+                    download_v_button.pack(fill="x", pady=(10, 0))
+
                 # --- FIM DA MUDANÇA ---
 
-            # 4. Agenda a função de população na thread principal
-            self.after(0, _populate_ui)
+            # 5. Agenda a função de população na thread principal
+            self.after(0, _populate_ui, data, versions_data)
             
         except Exception as e:
             print(f"Erro ao buscar detalhes: {e}")
             self.after(0, loading_label.config, {"text": f"Erro ao buscar dados: {e}", "bootstyle": "danger"})
+
+    def _open_mod_page(self, slug):
+        """Abre a página do projeto no Modrinth no navegador padrão."""
+        if not slug:
+            print("[ERRO] Não foi possível abrir a página do mod: Slug não encontrado.")
+            return
+            
+        try:
+            url = f"https://modrinth.com/project/{slug}"
+            print(f"[DEBUG] Abrindo URL: {url}")
+            webbrowser.open(url)
+        except Exception as e:
+            print(f"Erro ao abrir navegador: {e}")
 
 # --- Funções de Ajuda ---
 def offline_uuid_for(name: str) -> str:
@@ -751,7 +1276,7 @@ class RaposoLauncher(ttk.Window):
         self.active_account = None
         self.java_options = {}
         
-        self.LAUNCHER_VERSION = "v4.4.6"
+        self.LAUNCHER_VERSION = "v4.8.0"
         self.logo_clicks = 0
         
         self.bg_photo = None
@@ -974,15 +1499,11 @@ class RaposoLauncher(ttk.Window):
             print("[Discord RPC] (O Discord está aberto?)")
             return # Encerra o thread se não conseguir conectar
 
-        # <--- CORREÇÃO AQUI ---
-        # Define o tempo de início UMA VEZ, fora do loop
         start_time = int(time.time())
-        # <--- FIM DA CORREÇÃO ---
 
         # Loop de atualização (a cada 15 segundos)
         while True:
             try:
-                # --- GRANDES MUDANÇAS AQUI ---
                 self.RPC.update(
                     state=self.discord_state,
                     details=self.discord_details,
@@ -992,12 +1513,19 @@ class RaposoLauncher(ttk.Window):
                     small_text=self.discord_small_text,   # O TEXTO DINÂMICO
                     start=start_time,
                     
-                    # --- BOTÕES (COLOQUE SEUS LINKS) ---
+                    # --- MUDANÇA AQUI ---
                     buttons=[
-                        {"label": "Baixar o Raposo Launcher", "url": "https://github.com/assuerogames/RaposoLauncher"},
-                        {"label": "Entrar no Discord", "url": "https://discord.gg/SEU-CONVITE"} # Troque pelo seu link
+                        {
+                            "label": "Baixar o Raposo Launcher", 
+                            # Substitua a URL abaixo pela URL do seu novo repositório
+                            "url": "https://github.com/assuerogames/RaposoLauncher/blob/main/update.py" 
+                        },
+                        {
+                            "label": "Entrar no Discord", 
+                            "url": "https://discord.gg/MHXGyGqbrH" # Troque pelo seu link
+                        }
                     ]
-                    # --- FIM DAS MUDANÇAS ---
+                    # --- FIM DA MUDANÇA ---
                 )
             except Exception as e:
                 # Se o Discord fechar ou der erro, encerra o loop
@@ -2995,6 +3523,14 @@ class RaposoLauncher(ttk.Window):
 
         native_features = {} # Nativos só usam regras 'os'
 
+        # --- ###################################### ---
+        # --- CORREÇÃO (O BUG DO ${arch} ESTAVA AQUI!) ---
+        # --- ###################################### ---
+        # Precisamos de detetar a arquitetura AQUI TAMBÉM
+        is_64bit = platform.machine().endswith('64')
+        arch = "64" if is_64bit else "32"
+        # --- FIM DA CORREÇÃO ---
+
         for lib in version_data.get("libraries", []):
             if not self.check_rules(lib, native_features):
                 continue
@@ -3009,6 +3545,13 @@ class RaposoLauncher(ttk.Window):
                 native_classifier_key = natives.get(current_os)
             if not native_classifier_key:
                 native_classifier_key = f"natives-{current_os}"
+            
+            # --- ###################################### ---
+            # --- CORREÇÃO (Substituir ${arch}) ---
+            # --- ###################################### ---
+            # Substitui a variável ${arch} pelo valor real (ex: "64")
+            native_classifier_key = native_classifier_key.replace("${arch}", arch)
+            # --- FIM DA CORREÇÃO ---
             
             native_info = classifiers.get(native_classifier_key)
             if native_info:
@@ -3298,6 +3841,7 @@ class RaposoLauncher(ttk.Window):
                 self.discord_small_image = "default_icon"
                 self.discord_small_text = "Jogando Minecraft"
 
+            # --- ESTA É A VARIÁVEL LOCAL CORRETA ---
             game_dir = os.path.join(MODPACKS_DIR, modpack)
             os.makedirs(game_dir, exist_ok=True)
             java_exec = self.get_selected_java(java_name)
@@ -3340,8 +3884,8 @@ class RaposoLauncher(ttk.Window):
                         self._ensure_vanilla_json_exists(parent_version)
                     except Exception as e:
                          raise FileNotFoundError(f"Falha ao baixar o JSON pai '{parent_version}': {e}")
-
-            # --- 3. CONTAR TODO O RESTO ---
+            
+            # --- 2. JUNTAR DADOS DO PAI (VANILLA) E FILHO (LOADER) ---
             self.ui_queue.put({"type": "status", "text": "Contando arquivos..."})
             self.ui_queue.put({"type": "progress_start_indeterminate"})
             
@@ -3353,9 +3897,49 @@ class RaposoLauncher(ttk.Window):
 
             version_data = parent_data.copy()
             version_data.update(child_data) 
-            parent_libs = parent_data.get("libraries", []) 
-            child_libs = child_data.get("libraries", [])
-            version_data["libraries"] = parent_libs + child_libs
+            
+            lib_map = {} 
+
+            # --- CORREÇÃO 1 (get_lib_key): Chave única para bibliotecas ---
+            def get_lib_key(lib_entry):
+                """Cria uma chave única para a biblioteca, preservando o classificador."""
+                try:
+                    name = lib_entry.get("name", "")
+                    parts = name.split(":")
+                    
+                    if len(parts) >= 4: # Ex: org.lwjgl:lwjgl:3.3.3:natives-windows
+                        # Chave = org.lwjgl:lwjgl:natives-windows
+                        return f"{parts[0]}:{parts[1]}:{parts[3]}"
+                    elif len(parts) == 3: # Ex: org.lwjgl:lwjgl:3.3.3
+                        # Chave = org.lwjgl:lwjgl
+                        return f"{parts[0]}:{parts[1]}"
+                    else:
+                        return name # Fallback
+                except Exception:
+                    pass
+                return lib_entry.get("name")
+            # --- FIM DA CORREÇÃO 1 ---
+            
+            # --- ###################################### ---
+            # --- CORREÇÃO (Download): Detetar ${arch} ---
+            # --- ###################################### ---
+            is_64bit = platform.machine().endswith('64')
+            arch = "64" if is_64bit else "32"
+            os_name = platform.system().lower()
+            current_os = "windows" if "windows" in os_name else "linux" if "linux" in os_name else "osx"
+            # --- FIM DA CORREÇÃO ---
+
+            for lib in parent_data.get("libraries", []):
+                key = get_lib_key(lib)
+                if key:
+                    lib_map[key] = lib
+                    
+            for lib in child_data.get("libraries", []):
+                key = get_lib_key(lib)
+                if key:
+                    lib_map[key] = lib 
+            
+            version_data["libraries"] = list(lib_map.values())
             version_data["mainClass"] = child_data.get("mainClass", parent_data.get("mainClass"))
             
             main_class_detectada = version_data.get("mainClass", "")
@@ -3368,7 +3952,7 @@ class RaposoLauncher(ttk.Window):
                 if url: tasks_to_download.append((url, main_jar, f"{version}.jar"))
 
             parent_jar = None
-            if parent_version and not is_modern_forge:
+            if parent_version:
                 parent_jar = os.path.join(VERSIONS_DIR, parent_version, f"{parent_version}.jar")
                 if not os.path.exists(parent_jar):
                     url = parent_data.get("downloads", {}).get("client", {}).get("url")
@@ -3388,21 +3972,44 @@ class RaposoLauncher(ttk.Window):
                 
                 if artifact and artifact.get("path"):
                     lib_path_str = artifact.get("path")
-                elif not artifact and not classifiers and not natives:
-                    try: 
+                
+                # --- #################################################### ---
+                # --- CORREÇÃO (Download): Lógica Unificada (LWJGL 2/3 + Fabric)
+                # --- #################################################### ---
+                elif not artifact:
+                    try:
                         parts = lib_name.split(':')
-                        group = parts[0].replace('.', '/')
-                        name = parts[1]
-                        ver = parts[2]
-                        classifier = f"-{parts[3]}" if len(parts) > 3 else ""
-                        filename = f"{name}-{ver}{classifier}.jar"
+                        group = parts[0].replace('.', '/') # ex: org.lwjgl.lwjgl
+                        name = parts[1]                     # ex: lwjgl
+                        ver = parts[2]                      # ex: 2.9.4
+                        
+                        filename_base = f"{name}-{ver}"
+                        
+                        # Tenta encontrar um classificador nativo
+                        native_classifier = lib.get("natives", {}).get(current_os)
+                        
+                        if native_classifier:
+                            # Substitui ${arch} pelo valor real (32 ou 64)
+                            native_classifier = native_classifier.replace("${arch}", arch)
+                            filename = f"{filename_base}-{native_classifier}.jar"
+                        
+                        # --- CORREÇÃO IMPORTANTE AQUI ---
+                        # Se for "platform" (ex: jinput-platform), NÃO é um JAR principal.
+                        # Mas se *não for* "platform" E *não for* um nativo para este SO,
+                        # é um JAR principal (ex: lwjgl.jar, fabric-loader.jar)
+                        elif "platform" not in lib_name:
+                             filename = f"{filename_base}.jar"
+                        else:
+                            # É um "platform" ou um nativo para outro SO, ignora.
+                            continue
+                        # --- FIM DA CORREÇÃO ---
+
                         lib_path_str = f"{group}/{name}/{ver}/{filename}"
                     except Exception as e:
                         print(f"[DEBUG] Falha ao construir caminho para {lib_name}: {e}")
-                        continue
-                else:
-                    pass
-
+                        continue 
+                # --- FIM DA CORREÇÃO DE DOWNLOAD ---
+                
                 if lib_path_str:
                     lib_path = os.path.join(LIBRARIES_DIR, lib_path_str)
                     filename = lib_path_str.split('/')[-1]
@@ -3414,8 +4021,15 @@ class RaposoLauncher(ttk.Window):
                     elif artifact and artifact.get("url"):
                         url = artifact.get("url")
                     else:
-                        if "net.minecraftforge" in lib_path_str:
+                        # Se a URL não foi dada, constrói a URL padrão
+                        if "org.lwjgl.lwjgl" in lib_name or "net.java.jinput" in lib_name:
+                             url = f"https://libraries.minecraft.net/{lib_path_str}"
+                        elif "net.minecraftforge" in lib_name:
                             url = f"https://maven.minecraftforge.net/{lib_path_str}"
+                        # --- CORREÇÃO: Adiciona URL do Fabric ---
+                        elif "net.fabricmc" in lib_name:
+                            url = f"https://maven.fabricmc.net/{lib_path_str}"
+                        # --- FIM DA CORREÇÃO ---
                         else:
                             url = f"https://libraries.minecraft.net/{lib_path_str}"
 
@@ -3426,11 +4040,12 @@ class RaposoLauncher(ttk.Window):
                         tasks_to_download.append((url, lib_path, filename))
                 
                 if classifiers or natives:
-                    os_name = platform.system().lower()
-                    current_os = "windows" if "windows" in os_name else "linux" if "linux" in os_name else "osx"
                     native_classifier_key = None
                     if natives: native_classifier_key = natives.get(current_os)
                     if not native_classifier_key: native_classifier_key = f"natives-{current_os}"
+                    
+                    # --- CORREÇÃO (Download): Substitui ${arch}
+                    native_classifier_key = native_classifier_key.replace("${arch}", arch)
                     
                     native_info = classifiers.get(native_classifier_key)
                     if native_info:
@@ -3475,7 +4090,11 @@ class RaposoLauncher(ttk.Window):
                         try:
                             result = future.result() 
                         except Exception as e:
-                            print(f"FALHA no download (trabalhador): {filename} - {e}")
+                            # Ignora os erros 404 do Twitch e do JInput "fantasma"
+                            if "404 Client Error" in str(e) and ("twitch" in filename or "jinput-platform" in filename):
+                                print(f"[AVISO] Ignorando falha no download (404) para: {filename}")
+                            else:
+                                print(f"FALHA no download (trabalhador): {filename} - {e}")
                         
                         completed_count += 1
                         current_percent = int((completed_count / total_downloads) * 100)
@@ -3494,43 +4113,49 @@ class RaposoLauncher(ttk.Window):
             self.ui_queue.put({"type": "progress_start_indeterminate"}) 
             
             classpath_set = set()
-            processed_libs = set() 
-
+            
             if os.path.exists(main_jar): classpath_set.add(main_jar)
             if parent_jar and os.path.exists(parent_jar): classpath_set.add(parent_jar)
+            
+            is_legacy_version = "minecraftArguments" in version_data
 
             for lib in version_data.get("libraries", []):
-                lib_name = lib.get("name", "NOME_DESCONHECIDO")
-                if lib_name in processed_libs: continue
-                processed_libs.add(lib_name)
+                
                 if not self.check_rules(lib, lib_features): continue 
                 
+                lib_name = lib.get("name", "NOME_DESCONHECIDO")
                 downloads = lib.get("downloads", {})
                 artifact = downloads.get("artifact")
-                classifiers = downloads.get("classifiers")
-                natives = lib.get("natives")
                 
                 lib_path = None
                 
+                # --- ###################################### ---
+                # --- CORREÇÃO (Classpath): Lógica Unificada ---
+                # --- ###################################### ---
+                
                 if artifact and artifact.get("path"):
                     lib_path = os.path.join(LIBRARIES_DIR, artifact["path"])
+                
+                elif not artifact:
                     
-                elif downloads.get("path") and not classifiers and not natives:
-                    lib_path = os.path.join(LIBRARIES_DIR, downloads["path"])
-
-                elif not artifact and not classifiers and not natives:
+                    # Se for um JAR 'platform' (ex: lwjgl-platform, jinput-platform),
+                    # é SÓ para extração, NUNCA para o classpath.
+                    if "platform" in lib_name:
+                        continue
+                        
+                    # Se não for 'platform', é um JAR principal (ex: lwjgl.jar, fabric-loader.jar)
                     try:
                         parts = lib_name.split(':')
                         group = parts[0].replace('.', '/')
                         name = parts[1]
                         ver = parts[2]
-                        classifier = f"-{parts[3]}" if len(parts) > 3 else ""
+                        filename = f"{name}-{ver}.jar"
                         
-                        filename = f"{name}-{ver}{classifier}.jar"
                         lib_path_str = f"{group}/{name}/{ver}/{filename}"
                         lib_path = os.path.join(LIBRARIES_DIR, lib_path_str)
                     except Exception:
                         continue 
+                # --- FIM DA CORREÇÃO ---
                 
                 if lib_path and os.path.exists(lib_path):
                     classpath_set.add(lib_path)
@@ -3553,12 +4178,9 @@ class RaposoLauncher(ttk.Window):
             jvm_args = []
             game_args = []
 
-            # --- MUDANÇA CRÍTICA PARA O SEU ERRO ---
-            # Movido para o TOPO para garantir que execute SEMPRE
             if platform.system().lower() == "darwin":
                 print("[DEBUG] MacOS detectado! Adicionando flag obrigatória -XstartOnFirstThread")
                 jvm_args.append("-XstartOnFirstThread")
-            # -----------------------------------------
             
             # --- 8. LÓGICA DE DUAS VIAS (MODERNA vs LEGADA) ---
             
@@ -3621,21 +4243,27 @@ class RaposoLauncher(ttk.Window):
                     "is_quick_play_multiplayer": False,
                     "is_quick_play_realms": False
                 }
-                
-                is_modern_vanilla = (
-                    not is_modern_forge 
-                    and not is_modern_fabric 
-                    and not parent_version
-                    and ("1.19" in version or "1.20" in version or "1.21" in version)
-                )
 
                 jvm_args.append(f"-Xmx{ram_alloc}")
                 jvm_args.append(f"-Xms{ram_alloc}")
                 print(f"[DEBUG] Alocando RAM (do modpack): -Xmx{ram_alloc}")
                 
-                if is_modern_vanilla:
-                    print("[DEBUG] Adicionando flag de modo offline do Authlib.")
-                    jvm_args.append("-Dauthlib.environment=offline")
+                # --- CORREÇÃO (Auth Offline) ---
+                print("[DEBUG] Adicionando flag de modo offline do Authlib.")
+                jvm_args.append("-Dauthlib.environment=offline")
+                
+                # --- CORREÇÃO (Profile Key / Secure Chat) ---
+                print("[DEBUG] Desativando 'Secure Profile' (para login offline em servidores).")
+                jvm_args.append("-Dmojang.forceSecureProfile=false")
+                # (Opcional, mas altamente recomendado por segurança contra Log4Shell)
+                jvm_args.append("-Dlog4j2.formatMsgNoLookups=true")
+                
+                # --- #################################################### ---
+                # --- CORREÇÃO FINAL: Adicionar -Djava.library.path para Modernas
+                # --- #################################################### ---
+                jvm_args.append(f"-Djava.library.path={natives_dir}") 
+                # --- FIM DA CORREÇÃO ---
+
 
                 if "jvm" in version_data["arguments"]:
                     for arg_entry in version_data["arguments"]["jvm"]:
@@ -3678,10 +4306,18 @@ class RaposoLauncher(ttk.Window):
                             for v in values_to_add:
                                 game_args.append(self.replace_arg(v, replacements))
                     
+                    # --- CORREÇÃO (Nome Genérico) ---
                     if is_modern_fabric:
-                        print("[DEBUG] Adicionando argumentos de assets manualmente para o Fabric.")
+                        print("[DEBUG] Adicionando argumentos de auth/assets manualmente para o Fabric.")
+                        # --- ADIÇÕES AQUI ---
+                        game_args.extend(["--username", username])
+                        game_args.extend(["--uuid", use_uuid])
+                        game_args.extend(["--accessToken", access_token])
+                        game_args.extend(["--userType", "legacy"]) 
+                        # --- FIM DAS ADIÇÕES ---
                         game_args.extend(["--assetsDir", ASSETS_DIR])
                         game_args.extend(["--assetIndex", asset_index])
+                    # --- FIM DA CORREÇÃO ---
                 
                 if is_modern_forge:
                     print("[DEBUG] Adicionando argumentos de jogo manualmente para o Forge Moderno.")
@@ -3706,7 +4342,7 @@ class RaposoLauncher(ttk.Window):
             
             self.ui_queue.put({"type": "status", "text": "🚀 Iniciando o jogo..."})
             
-            # --- INÍCIO DA NOVA LÓGICA DE INICIALIZAÇÃO ---
+            # --- LÓGICA DE INICIALIZAÇÃO ---
             
             show_terminal = self.show_terminal.get()
             creation_flags = 0
@@ -3717,30 +4353,28 @@ class RaposoLauncher(ttk.Window):
             else:
                 print("[DEBUG] (BG Thread) Iniciando com terminal (Padrão ou não-Windows).")
 
-            # Inicia o jogo A PARTIR DO BACKGROUND THREAD (para não congelar a UI)
+            # --- CORREÇÃO (Pasta Errada) ---
             self.game_process = subprocess.Popen(
                 command, 
-                cwd=GAME_DIR, 
+                cwd=game_dir, # <-- MUDANÇA AQUI (de GAME_DIR para game_dir)
                 creationflags=creation_flags
             )
+            # --- FIM DA CORREÇÃO ---
 
-            # Envia a mensagem de sucesso para a UI
             self.ui_queue.put({"type": "status", "text": f"✅ {version} iniciado!", "style": SUCCESS})
             
-            # Se a opção de fechar estiver marcada, esta thread fica "viva"
             if self.close_after_launch.get():
                 print("[DEBUG] (BG Thread) Escondendo o launcher...")
-                self.ui_queue.put({"type": "hide_launcher"}) # Nova mensagem
+                self.ui_queue.put({"type": "hide_launcher"}) 
                 
                 print("[DEBUG] (BG Thread) Esperando o jogo fechar...")
-                self.game_process.wait() # Trava ESTE thread (o de background)
+                self.game_process.wait() 
                 
                 print("[DEBUG] (BG Thread) Jogo fechado. Solicitando reabertura...")
                 self.ui_queue.put({"type": "show_launcher"})
             
-            # Limpa a referência
             self.game_process = None
-            # --- FIM DA NOVA LÓGICA DE INICIALIZAÇÃO ---
+            # --- FIM DA LÓGICA DE INICIALIZAÇÃO ---
 
         except Exception as e:
             error_message = f"Erro: {e}"
