@@ -51,6 +51,7 @@ except ImportError:
 
 
 # --- CONFIGURAÇÕES OBRIGATÓRIAS ---
+# Este JSON é o do LAUNCHER (cat.pyw), não o do atualizador.
 VERSION_CHECK_URL = "https://gist.githubusercontent.com/assuerogames/b7060c5601dba31c60b92e3aeddc3eee/raw/raposo_version.json" 
 MAIN_APP_FILE = "cat.pyw"
 # --- FIM DA CONFIGURAÇÃO ---
@@ -75,7 +76,7 @@ class Updater(ttk.Window):
         self.title("Raposo Launcher - Atualizador")
         self.geometry("300x100")
         self.resizable(False, False)
-        self.place_window_center()
+        # self.place_window_center() # 'place_window_center' não existe, removido
         self.status_label = ttk.Label(self, text="Verificando arquivos...", font=("-family", 10))
         self.status_label.pack(pady=20, fill="x")
         self.progressbar = ttk.Progressbar(self, mode="indeterminate", bootstyle="primary-striped")
@@ -176,10 +177,14 @@ class Updater(ttk.Window):
                     file_name = file_info.get("file_name")
                     file_url = file_info.get("url")
                     if not file_name or not file_url: continue
-                    if file_name.endswith("update.py"): 
-                        print("Aviso: Pulando o 'update.py'.")
+
+                    # --- ESTA É A MUDANÇA CRÍTICA ---
+                    if file_name.endswith("core_update.py") or file_name.endswith("update.py"): 
+                        print(f"Aviso: Pulando o '{file_name}'. (Trabalho do Carregador)")
                         self.after(0, self.progressbar.step)
                         continue 
+                    # --- FIM DA MUDANÇA CRÍTICA ---
+                        
                     self.update_status(f"Baixando {file_name}...")
                     local_path = os.path.join(BASE_DIR, file_name)
                     try:
@@ -323,9 +328,13 @@ def run_updater_no_gui():
                     for i, file_info in enumerate(files_to_check):
                         file_name, file_url = file_info.get("file_name"), file_info.get("url")
                         if not file_name or not file_url: continue
-                        if file_name.endswith("update.py"): 
-                            print("Aviso: Pulando o 'update.py'.")
+                        
+                        # --- ESTA É A MUDANÇA CRÍTICA ---
+                        if file_name.endswith("core_update.py") or file_name.endswith("update.py"): 
+                            print(f"Aviso: Pulando o '{file_name}'. (Trabalho do Carregador)")
                             continue 
+                        # --- FIM DA MUDANÇA CRÍTICA ---
+                        
                         self.update_status(f"Baixando {file_name}...")
                         local_path = os.path.join(BASE_DIR, file_name)
                         try:
