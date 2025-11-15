@@ -5,7 +5,6 @@ import sys
 import time
 import re
 
-# --- 1. Auto-instalação do 'requests' (essencial) ---
 try:
     import requests
     print("[Carregador] 'requests' encontrado.")
@@ -18,17 +17,13 @@ except ImportError:
     except Exception as e:
         print(f"[Carregador] ERRO FATAL: Falha ao instalar 'requests'. {e}")
         time.sleep(10)
-        sys.exit(1) # Não pode continuar sem requests
+        sys.exit(1)
 
-# --- 2. CONFIGURAÇÃO ---
-# !!! ATENÇÃO: Substitua pela URL real do seu Gist/Hospedagem !!!
 UPDATER_VERSION_URL = "https://gist.githubusercontent.com/assuerogames/7359d09d756320187d55fa7ff9aad4d2/raw/updater_version.json" 
 
 CORE_UPDATER_FILE = "core_update.py"
 LOCAL_CORE_VERSION_FILE = "core_updater_version.json"
 BASE_DIR = os.path.dirname(__file__)
-# --- FIM DA CONFIGURAÇÃO ---
-
 
 def version_key(v_str):
     """Converte 'v1.2.3' para (1, 2, 3) para comparação."""
@@ -42,7 +37,7 @@ def get_local_version():
     """Lê a versão local do core-updater."""
     path = os.path.join(BASE_DIR, LOCAL_CORE_VERSION_FILE)
     if not os.path.exists(path):
-        return "v0.0.0" # Versão zero se o arquivo não existir
+        return "v0.0.0"
     try:
         with open(path, 'r') as f:
             return json.load(f).get("current_version", "v0.0.0")
@@ -160,4 +155,5 @@ def main():
 
 if __name__ == "__main__":
     print("--- Iniciando Carregador do Raposo Launcher ---")
+
     main()
